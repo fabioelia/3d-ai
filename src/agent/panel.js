@@ -33,6 +33,7 @@ function renderStatus() {
     status.textContent = agents.length
       ? `Connected. ${agents.map((a) => a.name).join(' and ')} can see and edit this part.`
       : `Connected to the Caliper bridge on ${link.addr.host}:${link.addr.port}. Waiting for an agent to attach.`;
+    if (link.chat?.outdated) status.textContent += ` ${link.chat.reason}`;
   } else if (st === 'connecting') status.textContent = 'Connecting to the Caliper bridge…';
   else if (st === 'retrying') status.textContent = link.detail || 'Waiting for the Caliper bridge. It starts when your agent does.';
   else status.textContent = link.detail || 'No agent connected.';

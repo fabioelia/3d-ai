@@ -177,6 +177,20 @@ await page.waitForFunction(() => !document.querySelector('#assistant.running'), 
 ok(!(await page.evaluate(() => !!document.querySelector('#assistant.running'))), 'Stop cancels a Claude Code run');
 await page.screenshot({ path: path.join(shots, 'bridge-chat.png') });
 
+// A bridge from before the chat existed (still running because the agent kept it alive) never
+// introduces itself; the page says how to restart it instead of "checking" forever.
+{
+  const { WebSocketServer } = await import('ws');
+  const old = new WebSocketServer({ port: PORT + 8, host: '127.0.0.1' });
+  old.on('connection', (ws) => ws.on('message', () => {}));
+  const p2 = await browser.newPage();
+  await p2.goto(`http://127.0.0.1:${PORT}/#bridge=${PORT + 8}-${'a'.repeat(32)}`);
+  await p2.waitForFunction(() => /older version/.test(document.getElementById('chat-note').textContent), null, { timeout: 15000 }).catch(() => {});
+  ok(/older version.*\/mcp.*Reconnect/.test(await p2.textContent('#chat-note')), `an outdated bridge is named, with how to restart it: ${await p2.textContent('#chat-note')}`);
+  await p2.close();
+  old.close();
+}
+
 // A second agent shares the same bridge; an HTTP client attaches too.
 const B = await agent('cursor');
 const pageBodies = await page.evaluate(() => window.caliper.store.results.bodies.length);

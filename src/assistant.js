@@ -177,7 +177,7 @@ function renderStatus() {
   const version = l?.chat?.version?.replace(/\s*\(Claude Code\)/, '');
   let note;
   if (ok) note = `Runs on Claude Code on this computer${version ? ` (${version})` : ''}, with your Claude login. It sees what you see and can only use Caliper's tools.`;
-  else if (l?.state === 'connected') note = l.chat?.reason ? `${l.chat.reason} The chat runs on Claude Code; install it and sign in, then restart the bridge.` : 'Checking for Claude Code on this computer…';
+  else if (l?.state === 'connected') note = l.chat?.outdated ? l.chat.reason : l.chat?.reason ? `${l.chat.reason} The chat runs on Claude Code; install it and sign in, then restart the bridge.` : 'Checking for Claude Code on this computer…';
   else note = 'The chat runs on Claude Code on your computer, over MCP. Open the Agent menu to connect it.';
   $('chat-note').textContent = note;
   $('chat-connect').hidden = ok || l?.state === 'connected';

@@ -87,6 +87,9 @@ function openBrowser(url) {
 // tools, pointed back at this bridge over MCP, and streams its reply into the panel. It runs on the
 // person's own Claude login, so no API key is needed.
 const CLAUDE_BIN = process.env.CALIPER_CLAUDE_BIN || 'claude';
+// Bumped whenever the page needs something new from the bridge; pages tell the person to restart an
+// older bridge instead of silently missing features.
+const PROTOCOL = 2;
 const CHAT_PROMPT = `You are working inside Caliper, a browser CAD tool for 3D-printable parts, and the person is chatting with you from Caliper's side panel while looking at the model. Use the caliper tools to see and change what they have open (get_state and screenshot first). Reply in one to three short plain sentences: no markdown, no code, no JSON. Say what you changed and which parameters are worth tweaking.`;
 
 let chatInfo = null; // { available, version, reason }
@@ -267,7 +270,7 @@ class Hub {
     const app = { ws, focusedAt: Date.now(), url: '', chats: new Map() };
     this.apps.push(app);
     log(`Caliper page connected (${this.apps.length} open)`);
-    const sendBridgeInfo = () => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'bridge', version: VERSION, chat: chatInfo || { available: false, reason: 'Checking for Claude Code…' } }));
+    const sendBridgeInfo = () => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'bridge', version: VERSION, protocol: PROTOCOL, chat: chatInfo || { available: false, reason: 'Checking for Claude Code…' } }));
     sendBridgeInfo();
     if (!chatInfo) chatReady.then(sendBridgeInfo);
     ws.on('message', (raw) => {

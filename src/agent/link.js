@@ -3,6 +3,11 @@
 import { runTool } from './tools.js';
 
 const SAVED = 'caliper.bridge';
+// The bridge protocol this page needs (bridge/server.mjs sends its own). Older bridges, often still
+// running from before an update because the agent keeps it alive, are named as such.
+const PROTOCOL = 2;
+export const RESTART_HINT = 'In Claude Code, run /mcp, pick caliper and choose Reconnect (or restart Claude Code). npx fetches the current version.';
+const OUTDATED = { available: false, outdated: true, reason: `The Caliper bridge on this computer is an older version, from before the side-panel chat. Restart it to update: ${RESTART_HINT}` };
 const read = () => {
   try {
     return JSON.parse(localStorage.getItem(SAVED) || 'null');
@@ -118,8 +123,17 @@ export class BridgeLink {
     this.ws = ws;
     ws.onopen = () => {
       this.retry = 0;
+      this.chat = null;
       this.send({ type: 'hello', url: location.href.split('#')[0], title: document.title });
       this.status('connected');
+      // Current bridges introduce themselves at once; silence means one from before that existed.
+      clearTimeout(this.handshake);
+      this.handshake = setTimeout(() => {
+        if (this.ws === ws && !this.chat) {
+          this.chat = OUTDATED;
+          this.onStatus?.(this);
+        }
+      }, 4000);
     };
     ws.onmessage = (ev) => this.receive(ev.data);
     ws.onclose = (ev) => {
@@ -170,7 +184,9 @@ export class BridgeLink {
       return;
     }
     if (msg.type === 'bridge') {
-      this.chat = msg.chat || null;
+      clearTimeout(this.handshake);
+      this.bridgeVersion = msg.version;
+      this.chat = (msg.protocol || 1) < PROTOCOL ? OUTDATED : msg.chat || null;
       this.onStatus?.(this);
     } else if (msg.type === 'chat-event') {
       this.chats.get(msg.id)?.(msg.event);
