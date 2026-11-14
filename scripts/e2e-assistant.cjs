@@ -26,7 +26,7 @@ const BOX = { name: 'Open box', params: [{ name: 'length', value: '60' }, { name
         let r2; try { await edit.execute({ upsert: [{ id: 'x', type: 'nonsense' }] }, {}); } catch (e) { r2 = e.message; }
         const r3 = await edit.execute({ set_params: { length: 80 }, upsert: [{ id: 'fillet1', type: 'fillet', name: 'Too big', edges: { parallel: 'z' }, radius: 50 }] }, {});
         const r4 = await edit.execute({ remove: ['fillet1'], upsert: [{ id: 'chamfer1', type: 'chamfer', name: 'Bed edge', edges: { on: 'bottom' }, distance: 0.6 }] }, {});
-        window.__reports = [r1, r2, r3, r4];
+        window.__reports = [JSON.parse(r1), r2, JSON.parse(r3), JSON.parse(r4)];
         opts.onText({ text: 'Built an open box.', delta: 'Built an open box.' });
         return { text: 'Built an open box.', truncated: false, modelTierApplied: 'default' };
       };
@@ -42,14 +42,14 @@ const BOX = { name: 'Open box', params: [{ name: 'length', value: '60' }, { name
     await p.waitForFunction(() => window.__reports && !document.querySelector('#assistant.running'), null, { timeout: 30000 });
     await p.waitForTimeout(500);
     const r = await p.evaluate(() => ({ s: window.__sample, reports: window.__reports, doc: window.caliper.store.doc, res: { bodies: window.caliper.store.results.bodies.length, max: window.caliper.store.results.max }, undo: window.caliper.store.undoStack.length, chat: document.getElementById('chat-log').innerText }));
-    ok(r.s.tools.join() === 'set_model,edit_model' && r.s.first.startsWith('You are the design assistant') && /CURRENT MODEL/.test(r.s.last) && /REQUEST: an open box please/.test(r.s.last) && r.s.cache === undefined, 'prompt carries the guide, the current model and the request');
+    ok(r.s.tools.length === 8 && r.s.tools[0] === 'edit_model' && r.s.tools.includes('set_model') && !r.s.tools.includes('screenshot') && r.s.first.startsWith('Caliper is a browser CAD tool') && /CURRENT STATE/.test(r.s.last) && /REQUEST: an open box please/.test(r.s.last) && r.s.cache === undefined, `prompt carries the guide, the current state and the request; tools: ${r.s.tools}`);
     ok(r.reports[0].ok && r.reports[0].bodies[0].size_mm.join() === '60,40,25', `set_model report: ${JSON.stringify(r.reports[0]).slice(0, 160)}`);
     ok(/Unknown feature type "nonsense"/.test(r.reports[1]), 'invalid feature types are rejected back to the assistant');
     ok(!r.reports[2].ok && r.reports[2].errors[0].feature === 'fillet1' && r.reports[2].bodies[0].size_mm[0] === 80, `build errors are reported: ${JSON.stringify(r.reports[2].errors)}`);
     ok(r.reports[3].ok && r.doc.features.map((f) => f.id).join() === 'sketch1,extrude1,shell1,chamfer1' && r.doc.name === 'Open box', 'edit_model removes and adds features');
-    ok(r.undo === 1 && /Built an open box/.test(r.chat) && /Model updated/.test(r.chat), `one undo step per assistant turn, reply shown (undo ${r.undo})`);
+    ok(r.undo === 3 && /Built an open box/.test(r.chat) && /Model updated/.test(r.chat), `one undo step per change, reply shown (undo ${r.undo})`);
     await p.screenshot({ path: `${dir}/e2e-assistant.png` });
-    await p.click('text=Undo this change'); await p.waitForTimeout(600);
+    await p.click('text=Undo these changes'); await p.waitForTimeout(600);
     ok(await p.evaluate(() => window.caliper.store.doc.name.startsWith('Example')), 'undo restores the previous part');
     await p.click('#export-btn'); await p.click('[data-file="stl"]');
     await p.waitForFunction(() => window.__saved, null, { timeout: 20000 });
@@ -96,9 +96,9 @@ const BOX = { name: 'Open box', params: [{ name: 'length', value: '60' }, { name
     ok(requests.length === 2, `two API rounds (${requests.length}); chat: ${r.chat.replace(/\n/g, ' | ').slice(0, 200)}`);
     const q = requests[0] || { headers: {}, body: {} };
     ok(/\/v1\/messages/.test(q.url || '') && q.headers['authorization'] === 'Bearer sk-ant-test-key' && q.headers['anthropic-dangerous-direct-browser-access'] === 'true' && /server-side-fallback-2026-07-01/.test(q.headers['anthropic-beta'] || ''), `request auth and beta header (${q.headers['anthropic-beta']})`);
-    ok(q.body.model === 'claude-opus-5-5' && q.body.stream === true && q.body.thinking?.type === 'adaptive' && q.body.fallbacks === 'default' && q.body.tools?.length === 2 && q.body.max_tokens === 64000 && !('temperature' in q.body), `request shape (${JSON.stringify({ model: q.body.model, thinking: q.body.thinking, eff: q.body.output_config, fb: q.body.fallbacks })})`);
+    ok(q.body.model === 'claude-opus-5-5' && q.body.stream === true && q.body.thinking?.type === 'adaptive' && q.body.fallbacks === 'default' && q.body.tools?.length === 11 && q.body.tools.some((t) => t.name === 'screenshot') && q.body.messages[0].content[0].type === 'image' && q.body.max_tokens === 64000 && !('temperature' in q.body), `request shape (${JSON.stringify({ model: q.body.model, thinking: q.body.thinking, eff: q.body.output_config, fb: q.body.fallbacks })})`);
     const m2 = requests[1]?.body.messages || [];
-    ok(m2.length === 3 && m2[1].role === 'assistant' && m2[1].content[0].type === 'tool_use' && m2[2].content[0].type === 'tool_result' && JSON.parse(m2[2].content[0].content).ok === true, 'tool result with the build report goes back to the API');
+    ok(m2.length === 3 && m2[1].role === 'assistant' && m2[1].content[0].type === 'tool_use' && m2[2].content[0].type === 'tool_result' && JSON.parse(m2[2].content[0].content[0].text).ok === true, 'tool result with the build report goes back to the API');
     ok(r.doc.name === 'Open box' && r.bodies === 1 && /Here is your open box/.test(r.chat), 'model replaced and reply shown');
     ok(errors.length === 0, `no page errors${errors.length ? ': ' + errors.join(' || ') : ''}`);
     await p.close();

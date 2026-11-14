@@ -51,6 +51,8 @@ export const store = {
   mode: { kind: 'model' }, // model | plane | sketch {id, tool} | pick {feature, key, kind}
   undoStack: [],
   redoStack: [],
+  activity: [], // what happened, newest last: { seq, t, by, text }
+  revision: 0, // bumps on every document change
   lastKey: null,
   lastAt: 0,
 };
@@ -124,13 +126,76 @@ export function newShapeId(sketch, kind) {
 
 export const featureById = (id) => store.doc.features.find((f) => f.id === id) || null;
 
+// ---------- activity ----------
+// A running log of who did what, so an agent can catch up on the person's edits and the person can
+// see what an agent did. `by` is 'user', 'assistant' (the built-in chat) or an agent's name.
+let seq = 0;
+let lastLog = null;
+export function logActivity(by, text, { merge = null } = {}) {
+  if (!text) return;
+  const now = Date.now();
+  if (merge && lastLog && lastLog.merge === merge && lastLog.by === by && now - lastLog.t < 2500) {
+    lastLog.text = text;
+    lastLog.t = now;
+    emit('activity', lastLog);
+    return;
+  }
+  const entry = { seq: ++seq, t: now, by, text, merge };
+  store.activity.push(entry);
+  if (store.activity.length > 300) store.activity.shift();
+  lastLog = entry;
+  emit('activity', entry);
+}
+
+const fname = (f) => `${f.name || f.type} (${f.id})`;
+export function describeChange(a, b) {
+  const out = [];
+  if (a.name !== b.name) out.push(`renamed the part to "${b.name}"`);
+  const pa = new Map((a.params || []).map((p) => [p.name, p.value]));
+  const pb = new Map((b.params || []).map((p) => [p.name, p.value]));
+  for (const [k, v] of pb) {
+    if (!pa.has(k)) out.push(`added parameter ${k} = ${v}`);
+    else if (pa.get(k) !== v) out.push(`set ${k} = ${v} (was ${pa.get(k)})`);
+  }
+  for (const k of pa.keys()) if (!pb.has(k)) out.push(`removed parameter ${k}`);
+  const fa = new Map((a.features || []).map((f) => [f.id, f]));
+  const fb = new Map((b.features || []).map((f) => [f.id, f]));
+  for (const [id, f] of fb) {
+    const old = fa.get(id);
+    if (!old) {
+      out.push(`added ${f.type} ${fname(f)}`);
+      continue;
+    }
+    if (JSON.stringify(old) === JSON.stringify(f)) continue;
+    const keys = [...new Set([...Object.keys(old), ...Object.keys(f)])].filter((k) => JSON.stringify(old[k]) !== JSON.stringify(f[k]));
+    if (keys.length === 1 && keys[0] === 'suppressed') out.push(`${f.suppressed ? 'suppressed' : 'unsuppressed'} ${fname(f)}`);
+    else if (keys.includes('shapes')) out.push(`edited the shapes in ${fname(f)}`);
+    else
+      out.push(
+        `changed ${fname(f)}: ${keys
+          .map((k) => {
+            const v = f[k];
+            return v === undefined ? `removed ${k}` : typeof v === 'object' ? (/edges|faces|face/.test(k) && v?.pick ? `${k} (${v.pick.length} picked)` : k) : `${k} = ${v}`;
+          })
+          .join(', ')}`,
+      );
+  }
+  for (const [id, f] of fa) if (!fb.has(id)) out.push(`deleted ${fname(f)}`);
+  const orderA = (a.features || []).map((f) => f.id).filter((id) => fb.has(id));
+  const orderB = (b.features || []).map((f) => f.id).filter((id) => fa.has(id));
+  if (orderA.join() !== orderB.join()) out.push('reordered the timeline');
+  return out.join('; ');
+}
+
 // Change the document. `key` coalesces rapid edits of the same field into one undo step.
-export function update(fn, { key = null, quiet = false } = {}) {
+export function update(fn, { key = null, quiet = false, by = 'user' } = {}) {
   const now = Date.now();
   const before = JSON.stringify(store.doc);
   fn(store.doc);
   const after = JSON.stringify(store.doc);
   if (after === before) return false;
+  store.revision++;
+  logActivity(by, describeChange(JSON.parse(before), store.doc), { merge: key ? `${by}:${key}` : null });
   if (!quiet) {
     if (!(key && key === store.lastKey && now - store.lastAt < 1500)) {
       store.undoStack.push(before);
@@ -146,7 +211,9 @@ export function update(fn, { key = null, quiet = false } = {}) {
   return true;
 }
 
-export function replaceDoc(doc, { undoable = true } = {}) {
+export function replaceDoc(doc, { undoable = true, by = 'user' } = {}) {
+  store.revision++;
+  logActivity(by, `replaced the whole part with "${doc.name || 'Untitled part'}" (${(doc.features || []).length} features)`);
   if (undoable) {
     store.undoStack.push(JSON.stringify(store.doc));
     store.redoStack.length = 0;
@@ -161,8 +228,10 @@ export function replaceDoc(doc, { undoable = true } = {}) {
   emit('mode');
 }
 
-function restore(from, to) {
-  if (!from.length) return;
+function restore(from, to, by, label) {
+  if (!from.length) return false;
+  store.revision++;
+  logActivity(by, label);
   to.push(JSON.stringify(store.doc));
   store.doc = JSON.parse(from.pop());
   store.lastKey = null;
@@ -175,17 +244,40 @@ function restore(from, to) {
   saveSoon();
   emit('doc', {});
   emit('select');
+  return true;
 }
-export const undo = () => restore(store.undoStack, store.redoStack);
-export const redo = () => restore(store.redoStack, store.undoStack);
+export const undo = (by = 'user') => restore(store.undoStack, store.redoStack, by, 'undid the last change');
+export const redo = (by = 'user') => restore(store.redoStack, store.undoStack, by, 'redid a change');
 
-export function select(patch) {
+const refList = (picks) => picks.map((p) => `${p.b}:${p.kind === 'face' ? 'F' : 'E'}${p.i}`).join(', ');
+export function select(patch, { by = 'user' } = {}) {
+  const prev = store.sel;
   store.sel = { ...store.sel, ...patch };
+  if (patch.picks && refList(patch.picks) !== refList(prev.picks || [])) {
+    logActivity(by, patch.picks.length ? `selected ${refList(patch.picks)}` : 'cleared the selection', { merge: `${by}:select` });
+  }
   emit('select');
 }
 
-export function setMode(mode) {
+export function setMode(mode, { by = 'user' } = {}) {
+  const prev = store.mode;
   store.mode = mode;
+  if (mode.kind !== prev.kind || mode.id !== prev.id) {
+    const f = (id) => store.doc.features.find((x) => x.id === id);
+    const text =
+      mode.kind === 'sketch'
+        ? `opened sketch ${fname(f(mode.id) || { id: mode.id, type: 'sketch' })} for editing`
+        : mode.kind === 'plane'
+          ? 'started a sketch and is choosing its plane'
+          : mode.kind === 'pick'
+            ? `is picking ${mode.pick}s for ${fname(f(mode.feature) || { id: mode.feature, type: 'feature' })}`
+            : prev.kind === 'sketch'
+              ? 'finished the sketch'
+              : prev.kind === 'pick'
+                ? 'finished picking'
+                : 'returned to modelling';
+    logActivity(by, text);
+  }
   emit('mode');
 }
 

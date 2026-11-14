@@ -13,3 +13,8 @@ if (!fs.existsSync(out) || fs.statSync(out).mtimeMs < fs.statSync(src).mtimeMs) 
 const font = new URL('../node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf', import.meta.url);
 const fontOut = new URL('../public/font.ttf', import.meta.url);
 if (!fs.existsSync(fontOut)) fs.copyFileSync(font, fontOut);
+
+// Manifold (mesh booleans for large imported STLs), gzipped the same way.
+const mesh = new URL('../node_modules/manifold-3d/manifold.wasm', import.meta.url);
+const meshOut = new URL('../public/mesh.wasm', import.meta.url);
+if (!fs.existsSync(meshOut) || fs.statSync(meshOut).mtimeMs < fs.statSync(mesh).mtimeMs) fs.writeFileSync(meshOut, zlib.gzipSync(fs.readFileSync(mesh), { level: 9 }));

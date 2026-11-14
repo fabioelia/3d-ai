@@ -1,6 +1,8 @@
 // Main-thread handle on the geometry worker.
 import KernelWorker from './worker.js?worker&inline';
+import { getFile } from '../files.js';
 
+const CDN_MESH_WASM = 'https://unpkg.com/manifold-3d@3.5.4/manifold.wasm';
 const CDN_FONT = 'https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf';
 const CDN_WASM = 'https://unpkg.com/replicad-opencascadejs@1.2.1/dist/replicad_single.wasm';
 
@@ -24,19 +26,19 @@ async function readAll(resp, onProgress, total) {
   return out;
 }
 
-// The kernel ships gzipped (7 MB instead of 23 MB) under a .wasm name so any static host serves it.
-// Whatever arrives is checked by its magic bytes, so a plain .wasm works too.
-async function fetchKernel(onProgress) {
+// The WebAssembly modules ship gzipped (7 MB instead of 23 MB for OpenCascade) under .wasm names so
+// any static host serves them. What arrives is checked by its magic bytes, so plain .wasm works too.
+async function fetchWasm(name, cdn, onProgress, expect) {
   let bytes;
   try {
-    const resp = await fetch(new URL('kernel.wasm', document.baseURI));
-    if (!resp.ok) throw new Error(`kernel.wasm ${resp.status}`);
-    bytes = await readAll(resp, onProgress, Number(resp.headers.get('content-length')) || 7.3e6);
+    const resp = await fetch(new URL(name, document.baseURI));
+    if (!resp.ok) throw new Error(`${name} ${resp.status}`);
+    bytes = await readAll(resp, onProgress, Number(resp.headers.get('content-length')) || expect);
   } catch (local) {
-    // Opened straight from disk, or served without the kernel file: fall back to the public CDN copy.
-    const resp = await fetch(CDN_WASM);
+    // Opened straight from disk, or served without the files: fall back to the public CDN copy.
+    const resp = await fetch(cdn);
     if (!resp.ok) throw new Error('Could not download the geometry kernel.');
-    bytes = await readAll(resp, onProgress, 23e6);
+    bytes = await readAll(resp, onProgress, expect * 3);
   }
   if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
     const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
@@ -74,8 +76,34 @@ export class Kernel {
   }
 
   async init(onProgress) {
-    const wasm = await fetchKernel(onProgress);
-    await this.call('init', { wasm }, [wasm]);
+    const [wasm, meshWasm] = await Promise.all([fetchWasm('kernel.wasm', CDN_WASM, onProgress, 7.3e6), fetchWasm('mesh.wasm', CDN_MESH_WASM, null, 2.1e5)]);
+    await this.call('init', { wasm, meshWasm }, [wasm, meshWasm]);
+  }
+
+  // Imported files live in the main thread (and the browser's storage); the worker gets a copy of
+  // each the first time a document needs it.
+  async syncFiles(doc) {
+    this.sent ||= new Set();
+    const ids = new Set((doc.features || []).filter((f) => f.type === 'import' && f.file && !f.suppressed).map((f) => f.file));
+    for (const fileId of ids) {
+      if (this.sent.has(fileId)) continue;
+      const file = await getFile(fileId);
+      if (!file) continue;
+      await this.call('file', { fileId, bytes: file.bytes.slice() });
+      this.sent.add(fileId);
+    }
+  }
+
+  query(sel, kind) {
+    return this.call('query', { sel, kind });
+  }
+
+  listElements(kind, sel, limit) {
+    return this.call('list', { kind, sel, limit });
+  }
+
+  measure(a, b) {
+    return this.call('measure', { a, b });
   }
 
   // Sketch text needs a font; it loads after the kernel so it never delays the first render.
@@ -113,6 +141,7 @@ export class Kernel {
   async run(job) {
     this.busy = true;
     try {
+      await this.syncFiles(job.doc);
       job.resolve(await this.call('evaluate', { doc: job.doc }));
     } catch (e) {
       job.reject(e);

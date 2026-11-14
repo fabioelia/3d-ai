@@ -207,8 +207,9 @@ export class Viewport {
         new THREE.MeshStandardMaterial({ color: this.colors.body, roughness: 0.62, metalness: 0.08, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
       );
       // Seams (where a round face closes on itself) are not drawn or pickable.
-      const shown = [];
-      for (const g of b.edgeGroups) if (!b.edges[g.i]?.seam) for (let k = g.start * 3; k < (g.start + g.count) * 3; k++) shown.push(b.lines[k]);
+      let shown = [];
+      if (b.isMesh) shown = b.lines; // mesh bodies: outline at sharp creases, nothing pickable
+      else for (const g of b.edgeGroups) if (!b.edges[g.i]?.seam && !b.edges[g.i]?.soft) for (let k = g.start * 3; k < (g.start + g.count) * 3; k++) shown.push(b.lines[k]);
       const lg = new THREE.BufferGeometry();
       lg.setAttribute('position', new THREE.Float32BufferAttribute(shown, 3));
       const lineObj = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: this.colors.edge }));
@@ -342,7 +343,7 @@ export class Viewport {
     for (const body of this.bodies) {
       const L = body.lines;
       for (const g of body.edgeGroups) {
-        if (body.edges[g.i]?.seam) continue;
+        if (body.edges[g.i]?.seam || body.edges[g.i]?.soft) continue;
         for (let k = g.start; k < g.start + g.count; k += 2) {
           a.set(L[k * 3], L[k * 3 + 1], L[k * 3 + 2]);
           b.set(L[k * 3 + 3], L[k * 3 + 4], L[k * 3 + 5]);
@@ -486,5 +487,193 @@ export class Viewport {
   snapshot() {
     this.renderer.render(this.scene, this.camera);
     return this.canvas;
+  }
+
+  // ---------- captures for agents ----------
+  // Renders what the person sees ('current') or a standard view, offscreen, without touching their
+  // camera. Optional labels name faces (F3) and edges (E7) so an agent can refer to them; the legend
+  // maps each label to its ref ("extrude1:F3"). Returns { dataUrl, width, height, legend }.
+  capture({ view = 'current', width = 1024, height = 768, labels = 'none', highlight = null } = {}) {
+    const views = view === 'all' ? ['iso', 'top', 'front', 'right'] : [view];
+    const grid = views.length > 1;
+    const cw = grid ? Math.round(width / 2) : width;
+    const ch = grid ? Math.round(height / 2) : height;
+    const out = document.createElement('canvas');
+    out.width = width;
+    out.height = height;
+    const ctx = out.getContext('2d');
+    this.shot ||= new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    this.shot.setPixelRatio(1);
+    this.shot.setSize(cw, ch, false);
+    this.shot.setClearColor(this.colors.bg);
+    // Hover is the mouse's business; selection and highlights stay, since they are part of the view.
+    const saved = { ...this.highlight };
+    const res = [...this.lineMaterials].map((m) => [m, m.resolution.clone()]);
+    for (const m of this.lineMaterials) m.resolution.set(cw, ch);
+    this.highlight = { hover: null, selected: highlight || saved.selected || [] };
+    this.refreshHighlights();
+    const legend = [];
+    const used = new Map();
+    const multi = this.bodies.length > 1;
+    views.forEach((name, k) => {
+      const cam = this.shotCamera(name, cw / ch);
+      this.shot.render(this.scene, cam);
+      const ox = grid ? (k % 2) * cw : 0;
+      const oy = grid ? Math.floor(k / 2) * ch : 0;
+      ctx.drawImage(this.shot.domElement, ox, oy, cw, ch);
+      if (labels !== 'none') this.drawLabels(ctx, cam, ox, oy, cw, ch, labels, legend, used, multi);
+      if (grid) {
+        ctx.font = '600 13px system-ui, sans-serif';
+        ctx.fillStyle = `#${this.colors.edge.getHexString()}`;
+        ctx.fillText(name.toUpperCase(), ox + 10, oy + 20);
+      }
+    });
+    if (grid) {
+      ctx.strokeStyle = `#${this.colors.grid.getHexString()}`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cw, 0);
+      ctx.lineTo(cw, height);
+      ctx.moveTo(0, ch);
+      ctx.lineTo(width, ch);
+      ctx.stroke();
+    }
+    this.highlight = saved;
+    for (const [m, r] of res) m.resolution.copy(r);
+    this.refreshHighlights();
+    return { dataUrl: out.toDataURL('image/png'), width, height, legend };
+  }
+
+  shotCamera(name, aspect) {
+    const cam = this.camera.clone();
+    if (name === 'current') {
+      const h = (this.camera.top - this.camera.bottom) / this.camera.zoom / 2;
+      cam.left = -h * aspect;
+      cam.right = h * aspect;
+      cam.top = h;
+      cam.bottom = -h;
+      cam.zoom = 1;
+      cam.updateProjectionMatrix();
+      return cam;
+    }
+    const dirs = { iso: [1, -1.3, 0.9], top: [0, 0, 1], bottom: [0, 0, -1], front: [0, -1, 0], back: [0, 1, 0], right: [1, 0, 0], left: [-1, 0, 0] };
+    const dir = new THREE.Vector3(...(dirs[name] || dirs.iso)).normalize();
+    const min = this.bounds ? this.bounds.min : [-40, -40, 0];
+    const max = this.bounds ? this.bounds.max : [40, 40, 30];
+    const center = new THREE.Vector3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
+    cam.up.set(0, 0, 1);
+    if (Math.abs(dir.z) > 0.99) cam.up.set(0, dir.z > 0 ? 1 : -1, 0);
+    cam.position.copy(center).addScaledVector(dir, CAM_DIST);
+    cam.lookAt(center);
+    cam.updateMatrixWorld();
+    // Fit the part's bounding box with a margin.
+    const inv = cam.matrixWorldInverse;
+    let hx = 1;
+    let hy = 1;
+    for (let i = 0; i < 8; i++) {
+      const p = new THREE.Vector3(i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]).applyMatrix4(inv);
+      hx = Math.max(hx, Math.abs(p.x));
+      hy = Math.max(hy, Math.abs(p.y));
+    }
+    let h = Math.max(hy, hx / aspect) * 1.12;
+    cam.left = -h * aspect;
+    cam.right = h * aspect;
+    cam.top = h;
+    cam.bottom = -h;
+    cam.zoom = 1;
+    cam.updateProjectionMatrix();
+    return cam;
+  }
+
+  drawLabels(ctx, cam, ox, oy, w, h, which, legend, used, multi) {
+    const ray = new THREE.Raycaster();
+    const meshes = this.bodies.map((b) => b.mesh);
+    const toPx = (p) => {
+      const v = new THREE.Vector3(...p).project(cam);
+      return [ox + ((v.x + 1) / 2) * w, oy + ((1 - v.y) / 2) * h, v];
+    };
+    const span = (cam.top - cam.bottom) || 1;
+    const visible = (p, test) => {
+      const v = new THREE.Vector3(...p).project(cam);
+      if (Math.abs(v.x) > 0.98 || Math.abs(v.y) > 0.98) return false;
+      ray.setFromCamera(new THREE.Vector2(v.x, v.y), cam);
+      const hit = ray.intersectObjects(meshes, false)[0];
+      return test(hit, ray);
+    };
+    const boxes = [];
+    const place = (x, y, text) => {
+      ctx.font = '600 11px ui-monospace, Menlo, monospace';
+      const tw = ctx.measureText(text).width + 8;
+      const box = [x - tw / 2, y - 8, tw, 16];
+      if (boxes.some((b) => box[0] < b[0] + b[2] && b[0] < box[0] + box[2] && box[1] < b[1] + b[3] && b[1] < box[1] + box[3])) return false;
+      boxes.push(box);
+      return box;
+    };
+    const draw = (box, text, bg) => {
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      ctx.roundRect(box[0], box[1], box[2], box[3], 4);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, box[0] + 4, box[1] + 8.5);
+    };
+    const letter = (bi) => String.fromCharCode(65 + (bi % 26));
+    this.bodies.forEach((body, bi) => {
+      if (body.isMesh) return;
+      const pos = body.positions;
+      const idx = body.indices;
+      if (which === 'faces' || which === 'all') {
+        // Largest faces first; anchor each label on one of its own visible triangles.
+        const groups = body.faceGroups.slice().sort((a, b) => (body.faces[b.i]?.a || 0) - (body.faces[a.i]?.a || 0)).slice(0, 80);
+        for (const g of groups) {
+          let anchor = null;
+          const step = Math.max(3, Math.floor(g.count / 3 / 6) * 3);
+          for (let t = g.start; t < g.start + g.count && !anchor; t += step) {
+            const c = [0, 1, 2].map((k) => (pos[idx[t] * 3 + k] + pos[idx[t + 1] * 3 + k] + pos[idx[t + 2] * 3 + k]) / 3);
+            if (visible(c, (hit) => hit && hit.object === body.mesh && hit.faceIndex * 3 >= g.start && hit.faceIndex * 3 < g.start + g.count)) anchor = c;
+          }
+          if (!anchor) continue;
+          const text = `${multi ? letter(bi) : ''}F${g.i}`;
+          const [x, y] = toPx(anchor);
+          const box = place(x, y, text);
+          if (!box) continue;
+          draw(box, text, '#2f5fd0');
+          const ref = `${body.id}:F${g.i}`;
+          if (!used.has(ref)) {
+            used.set(ref, true);
+            legend.push({ label: text, ref });
+          }
+        }
+      }
+      if (which === 'edges' || which === 'all') {
+        const edges = body.edges.map((d, i) => ({ d, i })).filter((e) => !e.d.seam && !e.d.soft).sort((a, b) => b.d.l - a.d.l).slice(0, 120);
+        for (const { d, i } of edges) {
+          const tol = span * 0.004;
+          const ok = visible(d.m, (hit, r) => !hit || hit.distance >= new THREE.Vector3(...d.m).sub(r.ray.origin).dot(r.ray.direction) - tol);
+          if (!ok) continue;
+          const text = `${multi ? letter(bi) : ''}E${i}`;
+          const [x, y] = toPx(d.m);
+          const box = place(x, y, text);
+          if (!box) continue;
+          draw(box, text, '#b4590b');
+          const ref = `${body.id}:E${i}`;
+          if (!used.has(ref)) {
+            used.set(ref, true);
+            legend.push({ label: text, ref });
+          }
+        }
+      }
+    });
+  }
+
+  cameraState() {
+    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
+    const named = { iso: [1, -1.3, 0.9], top: [0, 0, 1], bottom: [0, 0, -1], front: [0, -1, 0], back: [0, 1, 0], right: [1, 0, 0], left: [-1, 0, 0] };
+    let view = 'custom';
+    for (const [k, v] of Object.entries(named)) if (new THREE.Vector3(...v).normalize().dot(dir) > 0.999) view = k;
+    const r3 = (v) => v.toArray().map((x) => Math.round(x * 1000) / 1000);
+    const halfH = (this.camera.top - this.camera.bottom) / this.camera.zoom / 2;
+    return { view, looking_from: r3(dir), target: r3(this.controls.target), visible_height_mm: Math.round(halfH * 2 * 10) / 10 };
   }
 }

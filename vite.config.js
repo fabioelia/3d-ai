@@ -2,13 +2,14 @@ import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 
 // The OpenCascade glue references its .wasm via `new URL(..., import.meta.url)`, which would make the
-// bundler inline all 23 MB of it. Caliper hands the kernel its bytes itself (see src/kernel/client.js).
+// bundler inline all 23 MB of it (Manifold's glue does the same). Caliper hands both modules their bytes
+// itself (see src/kernel/client.js).
 const dropWasmUrl = () => ({
   name: 'caliper-drop-wasm-url',
   enforce: 'pre',
   transform(code, id) {
-    if (!id.includes('replicad_single.js')) return null;
-    return code.replace(/new URL\("replicad_single\.wasm",\s*import\.meta\.url\)/g, 'new URL("about:blank")');
+    if (!/replicad_single\.js|manifold-3d\/manifold\.js/.test(id)) return null;
+    return code.replace(/new URL\("(replicad_single|manifold)\.wasm",\s*import\.meta\.url\)/g, 'new URL("about:blank")');
   },
 });
 

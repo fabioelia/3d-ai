@@ -4,6 +4,7 @@
 import { evalExpr, resolveParams } from '../expr.js';
 import { BASE_PLANES, frameFromFace, offsetFrame, toWorld, v3, axisVec } from '../frame.js';
 import { pathPoints } from '../sketchgeo.js';
+import { parseSTL, stlToSolid, stlToMesh, meshDisplay, meshTriangles, SOLID_TRIANGLE_LIMIT } from './stl.js';
 
 const TOL = 1e-4;
 const DISPLAY_MESH = { tolerance: 0.04, angularTolerance: 0.25 };
@@ -29,8 +30,33 @@ const fail = (msg) => {
 export function createKernel(r) {
   let cache = [];
   let lastBodies = [];
+  let lastState = { bodies: [], count: 0 };
+  let lastScope = {};
   const meshCache = new WeakMap();
+  const rawMeshCache = new WeakMap();
   const topoCache = new WeakMap();
+  const files = new Map(); // imported file id -> bytes
+  const importCache = new Map(); // `${file}:${mode}` -> { shape, kind, triangles } or { error }
+  const isMesh = (s) => s instanceof r.MeshShape;
+
+  // Triangulation at display quality, shared by topology stats and the viewport mesh.
+  function rawMesh(shape) {
+    let m = rawMeshCache.get(shape);
+    if (!m) {
+      m = shape.mesh(DISPLAY_MESH);
+      rawMeshCache.set(shape, m);
+    }
+    return m;
+  }
+
+  // Circle through three points (radius of an arc or circle edge).
+  function circumradius(a, b, c) {
+    const ab = v3.dist(a, b);
+    const bc = v3.dist(b, c);
+    const ca = v3.dist(c, a);
+    const area2 = v3.len(v3.cross(v3.sub(b, a), v3.sub(c, a)));
+    return area2 > 1e-12 ? (ab * bc * ca) / (2 * area2) : null;
+  }
 
   // ---------- topology descriptors ----------
   const tup = (v) => {
@@ -41,17 +67,59 @@ export function createKernel(r) {
   function topo(shape) {
     let t = topoCache.get(shape);
     if (t) return t;
+    if (isMesh(shape)) {
+      // Mesh bodies (large imported STLs) have no faces or edges to select.
+      const bb = shape.boundingBox.bounds;
+      t = { faces: [], edges: [], fd: [], ed: [], min: bb[0], max: bb[1], mesh: true };
+      topoCache.set(shape, t);
+      return t;
+    }
     const faces = shape.faces;
     const edges = shape.edges;
-    const fd = faces.map((f) => {
-      const type = f.geomType;
+    // Exact area and centre per face are slow for solids made of thousands of triangles (imported
+    // STLs); measure those from the display triangulation instead.
+    let stats = null;
+    if (faces.length > 300) {
+      try {
+        const m = rawMesh(shape);
+        const order = new Map(faces.map((fc, i) => [fc.hashCode, i]));
+        stats = { a: new Float64Array(faces.length), c: faces.map(() => [0, 0, 0]) };
+        const V = m.vertices;
+        const T = m.triangles;
+        for (const g of m.faceGroups) {
+          const i = order.get(g.faceId);
+          if (i === undefined) continue;
+          let area = 0;
+          const c = [0, 0, 0];
+          for (let k = g.start; k < g.start + g.count; k += 3) {
+            const a = [V[T[k] * 3], V[T[k] * 3 + 1], V[T[k] * 3 + 2]];
+            const b = [V[T[k + 1] * 3], V[T[k + 1] * 3 + 1], V[T[k + 1] * 3 + 2]];
+            const d = [V[T[k + 2] * 3], V[T[k + 2] * 3 + 1], V[T[k + 2] * 3 + 2]];
+            const w = v3.len(v3.cross(v3.sub(b, a), v3.sub(d, a))) / 2;
+            area += w;
+            for (let q = 0; q < 3; q++) c[q] += ((a[q] + b[q] + d[q]) / 3) * w;
+          }
+          stats.a[i] = area;
+          stats.c[i] = area > 0 ? c.map((x) => Math.round((x / area) * 1e6) / 1e6) : c;
+        }
+      } catch {
+        stats = null;
+      }
+    }
+    const fd = faces.map((f, i) => {
+      const type = f.geomType === 'CYLINDRE' ? 'CYLINDER' : f.geomType; // replicad spells it the French way
       let n = null;
       let c = [0, 0, 0];
       let a = 0;
       try {
-        c = tup(f.center);
         if (type === 'PLANE') n = tup(f.normalAt());
-        a = r.measureArea(f);
+        if (stats) {
+          c = stats.c[i];
+          a = stats.a[i];
+        } else {
+          c = tup(f.center);
+          a = r.measureArea(f);
+        }
       } catch {
         /* keep defaults */
       }
@@ -61,9 +129,15 @@ export function createKernel(r) {
       try {
         const s = tup(e.startPoint);
         const en = tup(e.endPoint);
-        const l = e.length;
         const type = e.geomType;
-        return { s, e: en, m: tup(e.pointAt(0.5)), l, t: type, d: type === 'LINE' && l > 1e-9 ? v3.norm(v3.sub(en, s)) : null };
+        const l = type === 'LINE' ? v3.dist(s, en) : e.length;
+        const m = tup(e.pointAt(0.5));
+        const out = { s, e: en, m, l, t: type, d: type === 'LINE' && l > 1e-9 ? v3.norm(v3.sub(en, s)) : null };
+        if (type === 'CIRCLE') {
+          const rad = circumradius(tup(e.pointAt(0)), tup(e.pointAt(1 / 3)), tup(e.pointAt(2 / 3)));
+          if (rad) out.r = Math.round(rad * 1e6) / 1e6;
+        }
+        return out;
       } catch {
         return { s: [0, 0, 0], e: [0, 0, 0], m: [0, 0, 0], l: 0, t: 'OTHER' };
       }
@@ -82,6 +156,20 @@ export function createKernel(r) {
       edges.forEach((e, i) => {
         ed[i].f = [...(owners.get(e.hashCode) || [])];
         if (ed[i].f.length < 2) ed[i].seam = true;
+      });
+      // Edges between two almost coplanar flat faces (the facets of an imported mesh) are "soft": the
+      // viewport neither draws nor picks them, though selectors still see them.
+      const cosSoft = Math.cos((20 * Math.PI) / 180);
+      ed.forEach((d) => {
+        if (d.f.length === 2) {
+          const a = fd[d.f[0]];
+          const b = fd[d.f[1]];
+          if (a?.n && b?.n && v3.dot(a.n, b.n) > cosSoft) d.soft = true;
+        }
+      });
+      // A round face's radius, read from a circular edge on its boundary.
+      ed.forEach((d) => {
+        if (d.r && !d.seam) for (const fi of d.f) if (fd[fi] && fd[fi].t !== 'PLANE' && !fd[fi].r) fd[fi].r = d.r;
       });
     } catch {
       /* adjacency is a nicety; selection still works without it */
@@ -238,7 +326,16 @@ export function createKernel(r) {
   function select(state, sel, kind, n) {
     if (sel === undefined || sel === null) fail(`Pick the ${kind}s this applies to.`);
     let clauses = Array.isArray(sel) ? sel : [sel];
-    clauses = clauses.map((c) => (typeof c === 'string' ? (c === 'all' ? { all: true } : { on: c }) : c));
+    clauses = clauses.map((c) => {
+      if (typeof c !== 'string') return c;
+      const ref = /^(.+):([FE])(\d+)$/.exec(c);
+      if (ref) {
+        if ((ref[2] === 'F') !== (kind === 'face')) fail(`"${c}" is ${ref[2] === 'F' ? 'a face' : 'an edge'}, but this needs ${kind}s.`);
+        if (!state.bodies.some((b) => b.id === ref[1])) fail(`"${c}" refers to body "${ref[1]}", which does not exist at this point in the timeline.`);
+        return { pick: [{ b: ref[1], i: Number(ref[3]) }] };
+      }
+      return c === 'all' ? { all: true } : { on: c };
+    });
     const result = new Map();
     const add = (bi, i) => {
       if (!result.has(bi)) result.set(bi, new Set());
@@ -263,8 +360,52 @@ export function createKernel(r) {
   // ---------- geometry helpers ----------
   const planeOf = (frame) => new r.Plane(frame.origin, frame.x, frame.normal);
   const boxesTouch = (a, b) => [0, 1, 2].every((k) => a.min[k] <= b.max[k] + TOL && b.min[k] <= a.max[k] + TOL);
+  // Transforms that work on both exact solids and mesh bodies. (replicad's own mesh rotate, scale
+  // and offset mirror are unreliable, so mesh bodies go through Manifold's matrix transform.)
+  function meshXf(s, R, t) {
+    const m = [R[0][0], R[1][0], R[2][0], 0, R[0][1], R[1][1], R[2][1], 0, R[0][2], R[1][2], R[2][2], 0, t[0], t[1], t[2], 1];
+    return new r.MeshShape(s.wrapped.transform(m));
+  }
+  const matVec = (R, p) => [0, 1, 2].map((i) => R[i][0] * p[0] + R[i][1] * p[1] + R[i][2] * p[2]);
+  const xf = {
+    rotate(s, angle, center = [0, 0, 0], axis = [0, 0, 1]) {
+      if (!isMesh(s)) return s.rotate(angle, center, axis);
+      const [x, y, z] = v3.norm(axis);
+      const a = (angle * Math.PI) / 180;
+      const c = Math.cos(a);
+      const sn = Math.sin(a);
+      const C = 1 - c;
+      const R = [
+        [c + x * x * C, x * y * C - z * sn, x * z * C + y * sn],
+        [y * x * C + z * sn, c + y * y * C, y * z * C - x * sn],
+        [z * x * C - y * sn, z * y * C + x * sn, c + z * z * C],
+      ];
+      return meshXf(s, R, v3.sub(center, matVec(R, center)));
+    },
+    mirror(s, normal, origin = [0, 0, 0]) {
+      if (!isMesh(s)) return s.mirror(normal, origin);
+      const nn = v3.norm(normal);
+      const R = [0, 1, 2].map((i) => [0, 1, 2].map((j) => (i === j ? 1 : 0) - 2 * nn[i] * nn[j]));
+      return meshXf(s, R, v3.mul(nn, 2 * v3.dot(nn, origin)));
+    },
+    scale(s, k) {
+      return isMesh(s) ? new r.MeshShape(s.wrapped.scale(k)) : s.scale(k, [0, 0, 0]);
+    },
+  };
+
+  // Booleans between an exact solid and a mesh body run as mesh booleans (Manifold).
+  const asMesh = (s) => (isMesh(s) ? s : s.meshShape({ tolerance: 0.01, angularTolerance: 0.15 }));
+  function boolean(a, b, op) {
+    if (isMesh(a) || isMesh(b)) {
+      const A = asMesh(a);
+      const B = asMesh(b);
+      return op === 'join' ? A.fuse(B) : op === 'cut' ? A.cut(B) : A.intersect(B);
+    }
+    return op === 'join' ? a.fuse(b) : op === 'cut' ? a.cut(b) : a.intersect(b);
+  }
   const isEmpty = (shape) => {
     try {
+      if (isMesh(shape)) return shape.isEmpty;
       return !shape || shape.isNull || shape.faces.length === 0;
     } catch {
       return true;
@@ -403,8 +544,8 @@ export function createKernel(r) {
     }
     if (op === 'join') {
       let shape = bodies[targets[0]].shape;
-      shape = shape.fuse(tool);
-      for (const i of targets.slice(1)) shape = shape.fuse(bodies[i].shape);
+      shape = boolean(shape, tool, 'join');
+      for (const i of targets.slice(1)) shape = boolean(shape, bodies[i].shape, 'join');
       bodies[targets[0]] = { ...bodies[targets[0]], shape };
       const drop = new Set(targets.slice(1));
       return { ...state, bodies: bodies.filter((_, i) => !drop.has(i)) };
@@ -412,7 +553,7 @@ export function createKernel(r) {
     if (op === 'cut' || op === 'intersect') {
       const drop = new Set();
       for (const i of targets) {
-        const shape = op === 'cut' ? bodies[i].shape.cut(tool) : bodies[i].shape.intersect(tool);
+        const shape = boolean(bodies[i].shape, tool, op);
         if (isEmpty(shape)) drop.add(i);
         else bodies[i] = { ...bodies[i], shape };
       }
@@ -424,9 +565,9 @@ export function createKernel(r) {
 
   function place(shape, f, n) {
     const rot = (f.rot || [0, 0, 0]).map(n);
-    if (rot[0]) shape = shape.rotate(rot[0], [0, 0, 0], [1, 0, 0]);
-    if (rot[1]) shape = shape.rotate(rot[1], [0, 0, 0], [0, 1, 0]);
-    if (rot[2]) shape = shape.rotate(rot[2], [0, 0, 0], [0, 0, 1]);
+    if (rot[0]) shape = xf.rotate(shape, rot[0], [0, 0, 0], [1, 0, 0]);
+    if (rot[1]) shape = xf.rotate(shape, rot[1], [0, 0, 0], [0, 1, 0]);
+    if (rot[2]) shape = xf.rotate(shape, rot[2], [0, 0, 0], [0, 0, 1]);
     const at = (f.at || [0, 0, 0]).map(n);
     if (at[0] || at[1] || at[2]) shape = shape.translate(at);
     return shape;
@@ -452,8 +593,8 @@ export function createKernel(r) {
         let s = r.makeCylinder(pos(f.d, 'Diameter') / 2, h);
         if (f.centered) s = s.translate([0, 0, -h / 2]);
         const ax = String(f.axis || 'z').toLowerCase();
-        if (ax === 'x') s = s.rotate(90, [0, 0, 0], [0, 1, 0]);
-        else if (ax === 'y') s = s.rotate(-90, [0, 0, 0], [1, 0, 0]);
+        if (ax === 'x') s = xf.rotate(s, 90, [0, 0, 0], [0, 1, 0]);
+        else if (ax === 'y') s = xf.rotate(s, -90, [0, 0, 0], [1, 0, 0]);
         return s;
       }
       case 'sphere':
@@ -585,12 +726,66 @@ export function createKernel(r) {
         return { state: applyOp(state, tool, f), rec };
       }
 
+      case 'import': {
+        if (!f.file) fail('Choose an STL file to import.');
+        const bytes = files.get(f.file);
+        if (!bytes) fail(`The file for this import${f.fileName ? ` (${f.fileName})` : ''} is not loaded. Import it again, or open the project file that contains it.`);
+        const want = f.mode === 'solid' || f.mode === 'mesh' ? f.mode : 'auto';
+        const key = `${f.file}:${want}`;
+        let imp = importCache.get(key);
+        if (!imp) {
+          try {
+            const parsed = parseSTL(bytes);
+            let shape = null;
+            let kind = 'mesh';
+            if (want === 'solid' || (want === 'auto' && parsed.triangles <= SOLID_TRIANGLE_LIMIT)) {
+              try {
+                shape = stlToSolid(r, bytes);
+                kind = 'solid';
+              } catch (e) {
+                if (want === 'solid') throw new Error(e.message === 'not watertight' ? 'This STL has gaps, so it cannot become an exact solid. Try "Mesh" mode.' : 'This STL could not be turned into an exact solid. Try "Mesh" mode.');
+              }
+            }
+            if (!shape) shape = stlToMesh(r, parsed);
+            imp = { shape, kind, triangles: parsed.triangles };
+          } catch (e) {
+            imp = { error: e.message || 'This STL file could not be read.' };
+          }
+          importCache.set(key, imp);
+        }
+        if (imp.error) fail(imp.error);
+        const units = { mm: 1, cm: 10, m: 1000, in: 25.4 }[f.units || 'mm'] || 1;
+        const k = units * n(f.scale ?? 1);
+        if (!(k > 0)) fail('Scale must be greater than 0.');
+        let shape = imp.shape.clone();
+        if (Math.abs(k - 1) > 1e-12) shape = xf.scale(shape, k);
+        const rot = (f.rot || [0, 0, 0]).map(n);
+        if (rot[0]) shape = xf.rotate(shape, rot[0], [0, 0, 0], [1, 0, 0]);
+        if (rot[1]) shape = xf.rotate(shape, rot[1], [0, 0, 0], [0, 1, 0]);
+        if (rot[2]) shape = xf.rotate(shape, rot[2], [0, 0, 0], [0, 0, 1]);
+        if ((f.align || 'bed') === 'bed') {
+          // Centre it on the origin and sit it on the bed.
+          const [lo, hi] = shape.boundingBox.bounds;
+          shape = shape.translate([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]]);
+        }
+        const at = (f.at || [0, 0, 0]).map(n);
+        if (at[0] || at[1] || at[2]) shape = shape.translate(at);
+        const [lo, hi] = shape.boundingBox.bounds;
+        const size = hi.map((v, i) => Math.round((v - lo[i]) * 100) / 100).join(' × ');
+        rec.note =
+          imp.kind === 'solid'
+            ? `Imported as an exact solid (${imp.triangles.toLocaleString()} triangles merged into ${topo(shape).faces.length.toLocaleString()} faces), ${size} mm. You can sketch on its flat faces, fillet, shell and cut it.`
+            : `Imported as a mesh body (${imp.triangles.toLocaleString()} triangles), ${size} mm. It can be moved, joined, cut and patterned, but not filleted, chamfered or shelled.`;
+        rec.tool = { shape, f };
+        return { state: applyOp(state, shape, { ...f, op: f.op || 'new', bodyName: f.bodyName || f.name }), rec };
+      }
+
       case 'fillet':
       case 'chamfer': {
         const size = n(f.type === 'fillet' ? f.radius : f.distance);
         if (!(size > 0)) fail(`${f.type === 'fillet' ? 'Radius' : 'Distance'} must be greater than 0.`);
         const sel = select(state, f.edges, 'edge', n);
-        if (!sel.size) fail('No edges matched the selection.');
+        if (!sel.size) fail(state.bodies.some((b) => isMesh(b.shape)) ? 'No edges matched. Mesh bodies (large imported STLs) have no edges to round or bevel.' : 'No edges matched the selection.');
         const bodies = state.bodies.slice();
         for (const [bi, set] of sel) {
           const t = topo(bodies[bi].shape);
@@ -606,7 +801,7 @@ export function createKernel(r) {
         const th = n(f.thickness);
         if (!(th > 0)) fail('Wall thickness must be greater than 0.');
         const sel = select(state, f.faces, 'face', n);
-        if (!sel.size) fail('No faces matched. Pick the face to open up.');
+        if (!sel.size) fail(state.bodies.some((b) => isMesh(b.shape)) ? 'No faces matched. Mesh bodies (large imported STLs) cannot be shelled.' : 'No faces matched. Pick the face to open up.');
         const bodies = state.bodies.slice();
         for (const [bi, set] of sel) {
           const t = topo(bodies[bi].shape);
@@ -630,7 +825,7 @@ export function createKernel(r) {
           const axis = axisVec(f.axis ?? 'z');
           const center = (f.center || [0, 0, 0]).map(n);
           const step = Math.abs(Math.abs(total) - 360) < 1e-6 ? total / count : total / (count - 1);
-          for (let i = 1; i < count; i++) moves.push((s) => s.rotate(step * i, center, axis));
+          for (let i = 1; i < count; i++) moves.push((s) => xf.rotate(s, step * i, center, axis));
         } else {
           const c1 = Math.round(n(f.count ?? 2));
           const c2 = Math.round(n(f.count2 ?? 1));
@@ -658,14 +853,14 @@ export function createKernel(r) {
           for (const id of ids) {
             const t = ctx.tools[id] || fail(`"${id}" cannot be mirrored on its own. Leave "features" empty to mirror whole bodies.`);
             const hint = t.hint !== undefined ? state.bodies.findIndex((b) => b.id === t.hint) : -1;
-            state = applyOp(state, t.shape.clone().mirror(base.dir, origin), { ...t.f, op: t.f.op === 'new' ? 'join' : t.f.op, id: `${f.id}_${id}` }, hint >= 0 ? hint : undefined);
+            state = applyOp(state, xf.mirror(t.shape.clone(), base.dir, origin), { ...t.f, op: t.f.op === 'new' ? 'join' : t.f.op, id: `${f.id}_${id}` }, hint >= 0 ? hint : undefined);
           }
           return { state, rec };
         }
         if (!state.bodies.length) fail('There is nothing to mirror yet.');
         const bodies = state.bodies.map((b) => {
           if (f.body !== undefined && f.body !== b.id && f.body !== b.name) return b;
-          return { ...b, shape: b.shape.fuse(b.shape.clone().mirror(base.dir, origin)) };
+          return { ...b, shape: boolean(b.shape, xf.mirror(b.shape.clone(), base.dir, origin), 'join') };
         });
         return { state: { ...state, bodies }, rec };
       }
@@ -685,9 +880,9 @@ export function createKernel(r) {
           const t = topo(b.shape);
           const about = Array.isArray(f.about) ? f.about.map(n) : v3.mul(v3.add(t.min, t.max), 0.5);
           let s = b.shape.clone();
-          if (rot[0]) s = s.rotate(rot[0], about, [1, 0, 0]);
-          if (rot[1]) s = s.rotate(rot[1], about, [0, 1, 0]);
-          if (rot[2]) s = s.rotate(rot[2], about, [0, 0, 1]);
+          if (rot[0]) s = xf.rotate(s, rot[0], about, [1, 0, 0]);
+          if (rot[1]) s = xf.rotate(s, rot[1], about, [0, 1, 0]);
+          if (rot[2]) s = xf.rotate(s, rot[2], about, [0, 0, 1]);
           if (by[0] || by[1] || by[2]) s = s.translate(by);
           if (f.copy) {
             out.push(b, { id: `${f.id}_${b.id}`, name: `Body ${++count}`, shape: s });
@@ -757,17 +952,25 @@ export function createKernel(r) {
       if (entry.error) info[f.id].error = entry.error;
       if (entry.detail) info[f.id].detail = entry.detail;
       if (entry.rec.frame) info[f.id].frame = entry.rec.frame;
+      if (entry.rec.note) info[f.id].note = entry.rec.note;
       if (entry.picks) picks[f.id] = entry.picks;
     });
     cache = next;
     lastBodies = state.bodies;
+    lastState = state;
+    lastScope = scope;
 
     const transfer = [];
     const bodies = state.bodies.map((b) => {
       const t = topo(b.shape);
       let m = meshCache.get(b.shape);
+      if (!m && isMesh(b.shape)) {
+        const d = meshDisplay(b.shape);
+        m = { positions: d.positions, normals: d.normals, indices: d.indices, faceGroups: [], lines: d.lines, edgeGroups: [], volume: d.volume, isMesh: true, triangles: d.triangles };
+        meshCache.set(b.shape, m);
+      }
       if (!m) {
-        const tri = b.shape.mesh(DISPLAY_MESH);
+        const tri = rawMesh(b.shape);
         const ed = b.shape.meshEdges(DISPLAY_MESH);
         let volume = 0;
         try {
@@ -802,6 +1005,7 @@ export function createKernel(r) {
         min: t.min,
         max: t.max,
         volume: m.volume,
+        ...(m.isMesh ? { isMesh: true, triangles: m.triangles } : {}),
       };
       transfer.push(out.positions.buffer, out.normals.buffer, out.indices.buffer, out.lines.buffer);
       return out;
@@ -841,7 +1045,7 @@ export function createKernel(r) {
   }
 
   function exportSTL(ids, quality = 'standard') {
-    const meshes = pickBodies(ids).map((b) => b.shape.mesh(QUALITY[quality] || QUALITY.standard));
+    const meshes = pickBodies(ids).map((b) => (isMesh(b.shape) ? meshTriangles(b.shape) : b.shape.mesh(QUALITY[quality] || QUALITY.standard)));
     const count = meshes.reduce((s, m) => s + m.triangles.length / 3, 0);
     const buf = new ArrayBuffer(84 + count * 50);
     const dv = new DataView(buf);
@@ -886,9 +1090,114 @@ export function createKernel(r) {
   }
 
   async function exportSTEP(ids) {
-    const blob = r.exportSTEP(pickBodies(ids).map((b) => ({ shape: b.shape, name: b.name })));
-    return { buffer: await blob.arrayBuffer() };
+    const all = pickBodies(ids);
+    const solids = all.filter((b) => !isMesh(b.shape));
+    if (!solids.length) throw new Error('STEP holds exact solids, and every body here is a mesh (an imported STL). Export STL instead.');
+    const blob = r.exportSTEP(solids.map((b) => ({ shape: b.shape, name: b.name })));
+    return { buffer: await blob.arrayBuffer(), skipped: all.filter((b) => isMesh(b.shape)).map((b) => b.name) };
   }
 
-  return { evaluate, exportSTL, exportSTEP };
+  // ---------- files ----------
+  function addFile(id, bytes) {
+    files.set(id, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    for (const k of importCache.keys()) if (k.startsWith(`${id}:`)) importCache.delete(k);
+  }
+
+  // ---------- questions about the last built model (for agents) ----------
+  const refOf = (bodyId, kind, i) => `${bodyId}:${kind === 'face' ? 'F' : 'E'}${i}`;
+  function bodyIndex(id) {
+    const i = lastState.bodies.findIndex((b) => b.id === id || b.name === id);
+    if (i < 0) throw new Error(`There is no body "${id}". Bodies: ${lastState.bodies.map((b) => `${b.id} (${b.name})`).join(', ') || 'none'}.`);
+    return i;
+  }
+
+  // Resolve a selector (or refs) to elements: [{ ref, b, i }].
+  function query(sel, kind) {
+    const n = (v) => evalExpr(v, lastScope);
+    const res = select(lastState, JSON.parse(JSON.stringify(sel)), kind, n);
+    const out = [];
+    for (const [bi, set] of res) for (const i of set) out.push({ ref: refOf(lastState.bodies[bi].id, kind, i), b: lastState.bodies[bi].id, i });
+    return out;
+  }
+
+  function element(ref) {
+    const m = /^(.+):([FE])(\d+)$/.exec(String(ref));
+    if (!m) {
+      const bi = bodyIndex(ref);
+      return { kind: 'body', body: lastState.bodies[bi] };
+    }
+    const body = lastState.bodies[bodyIndex(m[1])];
+    if (isMesh(body.shape)) throw new Error(`${body.name} is a mesh body; it has no individual faces or edges.`);
+    const t = topo(body.shape);
+    const i = Number(m[3]);
+    const kind = m[2] === 'F' ? 'face' : 'edge';
+    const shape = (kind === 'face' ? t.faces : t.edges)[i];
+    if (!shape) throw new Error(`${ref} does not exist (the body has ${t.faces.length} faces and ${t.edges.length} edges).`);
+    return { kind, body, i, shape, d: (kind === 'face' ? t.fd : t.ed)[i] };
+  }
+
+  const r3 = (p) => p.map((x) => Math.round(x * 1000) / 1000);
+  function describe(el) {
+    if (el.kind === 'body') {
+      const t = topo(el.body.shape);
+      const out = { ref: el.body.id, name: el.body.name, kind: isMesh(el.body.shape) ? 'mesh body' : 'solid body', min: r3(t.min), max: r3(t.max), size: r3(t.max.map((v, k) => v - t.min[k])) };
+      try {
+        if (isMesh(el.body.shape)) {
+          out.volume = Math.round(el.body.shape.volume() * 1000) / 1000;
+          out.surface_area = Math.round(el.body.shape.surfaceArea() * 1000) / 1000;
+        } else {
+          const vp = r.measureShapeVolumeProperties(el.body.shape);
+          out.volume = Math.round(vp.volume * 1000) / 1000;
+          out.center_of_mass = r3(vp.centerOfMass);
+          out.surface_area = Math.round(r.measureArea(el.body.shape) * 1000) / 1000;
+          out.faces = t.faces.length;
+          out.edges = t.ed.filter((e) => !e.seam).length;
+        }
+      } catch {
+        /* partial info is still useful */
+      }
+      return out;
+    }
+    const d = el.d;
+    const ref = refOf(el.body.id, el.kind, el.i);
+    if (el.kind === 'face') return { ref, kind: 'face', type: d.t.toLowerCase(), area: Math.round(d.a * 1000) / 1000, center: r3(d.c), ...(d.n ? { normal: r3(d.n) } : {}), ...(d.r ? { radius: d.r } : {}) };
+    return { ref, kind: 'edge', type: d.t.toLowerCase(), length: Math.round(d.l * 1000) / 1000, start: r3(d.s), end: r3(d.e), mid: r3(d.m), ...(d.r ? { radius: d.r, diameter: Math.round(d.r * 2000) / 1000 } : {}), ...(d.d ? { direction: r3(d.d) } : {}) };
+  }
+
+  const angleDeg = (a, b) => (Math.acos(Math.max(-1, Math.min(1, v3.dot(v3.norm(a), v3.norm(b))))) * 180) / Math.PI;
+  function measure(a, b) {
+    const A = element(a);
+    const out = { a: describe(A) };
+    if (b === undefined || b === null || b === '') return out;
+    const B = element(b);
+    out.b = describe(B);
+    if (A.kind === 'body' || B.kind === 'body') {
+      if (isMesh(A.body.shape) || isMesh(B.body.shape)) return out;
+    }
+    try {
+      const sa = A.kind === 'body' ? A.body.shape : A.shape;
+      const sb = B.kind === 'body' ? B.body.shape : B.shape;
+      out.min_distance = Math.round(r.measureDistanceBetween(sa, sb) * 1e5) / 1e5;
+    } catch {
+      /* not every pair has a distance */
+    }
+    const dir = (el) => (el.kind === 'face' ? el.d.n : el.kind === 'edge' ? el.d.d : null);
+    const da = dir(A);
+    const db = dir(B);
+    if (da && db) {
+      const ang = angleDeg(da, db);
+      if (A.kind === B.kind) out.angle_deg = Math.round(Math.min(ang, 180 - ang) * 1000) / 1000;
+      else out.angle_to_plane_deg = Math.round(Math.abs(90 - ang) * 1000) / 1000;
+      if (A.kind === 'face' && B.kind === 'face' && Math.abs(Math.abs(v3.dot(da, db)) - 1) < 1e-6) out.gap_between_planes = Math.round(Math.abs(v3.dot(da, v3.sub(B.d.c, A.d.c))) * 1e5) / 1e5;
+    }
+    return out;
+  }
+
+  function listElements(kind, sel, limit = 200) {
+    const els = sel ? query(sel, kind) : lastState.bodies.flatMap((body) => (isMesh(body.shape) ? [] : (kind === 'face' ? topo(body.shape).fd : topo(body.shape).ed).map((d, i) => ({ ref: refOf(body.id, kind, i), b: body.id, i, seam: d.seam })).filter((x) => !x.seam)));
+    const items = els.slice(0, limit).map((x) => describe(element(x.ref)));
+    return { total: els.length, items };
+  }
+
+  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements };
 }

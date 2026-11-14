@@ -28,11 +28,12 @@ function defaultName(type) {
   return `${label} ${n}`;
 }
 
-export function addFeature(type, props = {}) {
+export function addFeature(type, props = {}, { by = 'user' } = {}) {
   const f = { id: newFeatureId(type), type, name: defaultName(type), ...structuredClone(DEFAULTS[type] || {}), ...props };
-  update((doc) => doc.features.push(f));
-  select({ feature: f.id, shape: null, picks: [] });
-  emit('focus-first');
+  update((doc) => doc.features.push(f), { by });
+  // An agent adding a feature opens it in the inspector but leaves the person's selection alone.
+  select(by === 'user' ? { feature: f.id, shape: null, picks: [] } : { feature: f.id, shape: null }, { by });
+  if (by === 'user') emit('focus-first');
   return f;
 }
 
@@ -170,6 +171,37 @@ export function viewportClick(pick, evt) {
   select({ picks });
 }
 
+// ---------- importing ----------
+// Brings STL files in as Import features; returns the new feature ids.
+export async function importFiles(fileList, { by = 'user', props = {} } = {}) {
+  const { putFile } = await import('./files.js');
+  const added = [];
+  for (const file of fileList) {
+    if (!/\.stl$/i.test(file.name)) {
+      app.toast(`${file.name} is not an STL file. Caliper imports .stl files.`, 'error');
+      continue;
+    }
+    if (file.size > 200 * 1024 * 1024) {
+      app.toast(`${file.name} is larger than 200 MB.`, 'error');
+      continue;
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const id = await putFile(file.name, bytes);
+    if (store.mode.kind !== 'model') leaveMode();
+    const name = file.name.replace(/\.stl$/i, '');
+    const f = addFeature('import', { name, fileName: file.name, file: id, op: 'new', ...props }, { by });
+    added.push(f.id);
+  }
+  if (added.length) {
+    const res = await app.rebuildNow();
+    app.viewport.fit();
+    const errs = added.map((id) => res?.features?.[id]?.error).filter(Boolean);
+    if (errs.length) app.toast(errs[0], 'error');
+    else app.toast(res?.features?.[added[added.length - 1]]?.note || 'Imported.');
+  }
+  return added;
+}
+
 // ---------- toolbar ----------
 function findSketch() {
   const cur = featureById(store.sel.feature);
@@ -200,6 +232,8 @@ export function command(name) {
   switch (name) {
     case 'sketch':
       return startSketch();
+    case 'import':
+      return document.getElementById('import-file')?.click();
     case 'box':
     case 'cylinder':
     case 'cone':

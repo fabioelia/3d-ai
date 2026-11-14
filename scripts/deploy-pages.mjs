@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const dist = path.join(root, 'dist');
 const sh = (cmd, cwd = root) => execSync(cmd, { cwd, stdio: ['ignore', 'pipe', 'inherit'] }).toString().trim();
 
-for (const f of ['index.html', 'kernel.wasm', 'font.ttf']) {
+for (const f of ['index.html', 'kernel.wasm', 'mesh.wasm', 'font.ttf']) {
   if (!fs.existsSync(path.join(dist, f))) throw new Error(`dist/${f} is missing. Run "npm run build" first.`);
 }
 const remote = sh('git remote get-url origin');
@@ -17,7 +17,7 @@ const rev = sh('git rev-parse --short HEAD');
 const dirty = sh('git status --porcelain') ? ' (with uncommitted changes)' : '';
 
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'caliper-pages-'));
-for (const f of ['index.html', 'kernel.wasm', 'font.ttf']) fs.copyFileSync(path.join(dist, f), path.join(out, f));
+for (const f of ['index.html', 'kernel.wasm', 'mesh.wasm', 'font.ttf']) fs.copyFileSync(path.join(dist, f), path.join(out, f));
 fs.writeFileSync(path.join(out, '.nojekyll'), ''); // serve the files as they are, no Jekyll pass
 
 sh('git init -q -b gh-pages', out);

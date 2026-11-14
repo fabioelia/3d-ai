@@ -95,8 +95,8 @@ const ok = (c, m) => { console.log(`${c ? 'PASS' : 'FAIL'} ${m}`); if (!c) faile
   s = await state(); ok(near(s.max[2], 20) && !s.errs.length, `parameter expression drives height (max z ${s.max[2]})`);
   const before = s.n;
   await p.keyboard.press('Escape');
-  await p.click('#undo'); await p.click('#undo'); await settle();
-  await p.click('#redo'); await p.click('#redo'); await settle();
+  await p.click('#undo'); await settle(); await p.click('#undo'); await settle();
+  await p.click('#redo'); await settle(); await p.click('#redo'); await settle();
   s = await state(); ok(s.n === before && near(s.max[2], 20), 'undo and redo round-trip');
   await p.screenshot({ path: `${dir}/e2e-model.png` });
 
@@ -105,13 +105,23 @@ const ok = (c, m) => { console.log(`${c ? 'PASS' : 'FAIL'} ${m}`); if (!c) faile
   const path = await dl.path(); const size = require('fs').statSync(path).size;
   const buf = require('fs').readFileSync(path); const tris = buf.readUInt32LE(80);
   ok(dl.suggestedFilename().endsWith('.stl') && size === 84 + tris * 50 && tris > 100, `STL downloads (${dl.suggestedFilename()}, ${tris} triangles)`);
+  // --- import the STL we just exported, through the Import button
+  const before2 = (await state()).bodies;
+  await p.setInputFiles('#import-file', { name: 'roundtrip.stl', mimeType: 'model/stl', buffer: buf });
+  await p.waitForFunction((n) => window.caliper.store.results?.bodies.length === n + 1, before2, { timeout: 60000 }).catch(() => {});
+  s = await state();
+  const imp = await p.evaluate(() => { const f = window.caliper.store.doc.features.at(-1); return { type: f.type, name: f.name, note: window.caliper.store.results.features[f.id]?.note, err: window.caliper.store.results.features[f.id]?.error }; });
+  ok(imp.type === 'import' && s.bodies === before2 + 1 && !imp.err, `STL import adds a body (${imp.note || imp.err})`);
+  await p.screenshot({ path: `${dir}/e2e-import.png` });
+
   const [dl2] = await Promise.all([p.waitForEvent('download', { timeout: 20000 }), (async () => { await p.click('#file-btn'); await p.click('[data-file="step"]'); })()]);
   ok(dl2.suggestedFilename().endsWith('.step'), 'STEP downloads');
 
   // --- reload restores the autosave
+  const nSaved = (await state()).n;
   await p.waitForTimeout(600); await p.reload();
   await p.waitForFunction(() => window.caliper?.store.results, null, { timeout: 60000 });
-  s = await state(); ok(s.n === before, 'reload restores the saved part');
+  s = await state(); ok(s.n === nSaved && s.bodies === before2 + 1, 'reload restores the saved part, imported STL included');
 
   ok(errors.length === 0, `no console errors${errors.length ? ': ' + errors.join(' || ') : ''}`);
   await b.close();

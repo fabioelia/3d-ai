@@ -1,11 +1,12 @@
-// The side assistant: a chat that edits the same document the person does, through two tools.
-// Inside a Claude artifact it uses the viewer's Claude (the `sample` capability); elsewhere it calls
-// the Claude API directly with a key the person keeps in their own browser.
+// The built-in assistant: a chat that works on the same model the person does, with the same tools
+// external agents get over MCP (src/agent/catalog.js). Inside a Claude artifact it uses the viewer's
+// Claude (the `sample` capability); elsewhere it calls the Claude API with a key the person keeps in
+// their own browser. Each turn starts with a picture of the person's current view.
 import Anthropic from '@anthropic-ai/sdk';
-import { store, update, replaceDoc, normalize, on } from './store.js';
-import { GUIDE, TOOLS } from './guide.js';
-import { FEATURES } from './schema.js';
-import { fmt } from './expr.js';
+import { store, on } from './store.js';
+import { GUIDE } from './guide.js';
+import { TOOLS } from './agent/catalog.js';
+import { runTool, stateSnapshot } from './agent/tools.js';
 import * as act from './actions.js';
 import { h } from './ui.js';
 
@@ -20,11 +21,27 @@ const SUGGESTIONS = [
   'Make the plate 80 mm wide and add two more holes along the long edges',
   'A 70 × 45 × 25 mm open box with 2 mm walls and rounded corners',
   'A phone stand that holds the phone at 65°',
-  'Chamfer the bottom edges by 0.6 mm so it lifts off the bed cleanly',
+  'Will this print without supports? Fix what would not.',
 ];
+// External-agent tools that make no sense from inside the page's own chat.
+const NOT_IN_APP = new Set(['import_stl', 'get_guide', 'show_message', 'get_state']);
+// When the viewer limits how many tools a page may offer, these come first.
+const PRIORITY = ['edit_model', 'set_model', 'query_geometry', 'measure', 'check_printability', 'select', 'set_view', 'ask_user', 'ui_action', 'export_file', 'screenshot'];
+const STEP_LABEL = {
+  screenshot: 'Looking at the model',
+  query_geometry: 'Reading geometry',
+  measure: 'Measuring',
+  check_printability: 'Checking printability',
+  set_model: 'Building the model',
+  edit_model: 'Editing the model',
+  select: 'Selecting',
+  set_view: 'Moving the camera',
+  ui_action: 'Using the interface',
+  ask_user: 'Waiting for you',
+  export_file: 'Exporting',
+};
 
 const $ = (id) => document.getElementById(id);
-const r2 = (v) => Math.round(v * 100) / 100;
 const read = (k) => {
   try {
     return localStorage.getItem(k) || '';
@@ -42,8 +59,10 @@ const write = (k, v) => {
 };
 
 const state = {
-  backend: 'pending', // pending | claude | key
+  backend: 'pending', // pending | claude | key | none
   sample: null,
+  sampleImages: false,
+  maxTools: 0,
   apiKey: read(KEY_STORE),
   model: read(MODEL_STORE) || MODELS[0][0],
   turns: [], // text-only history for the artifact backend
@@ -51,126 +70,105 @@ const state = {
   running: null, // AbortController
 };
 
-// ---------- what the assistant is told about the model ----------
-function buildReport(res) {
-  if (!res) return { ok: false, note: 'The model could not be rebuilt.' };
-  const errors = [];
-  for (const f of store.doc.features) {
-    const e = res.features?.[f.id]?.error;
-    if (e && !f.suppressed) errors.push({ feature: f.id, type: f.type, message: e });
-  }
-  const paramErrors = Object.entries(res.paramErrors || {}).map(([name, message]) => ({ parameter: name, message }));
-  return {
-    ok: !errors.length && !paramErrors.length,
-    errors,
-    ...(paramErrors.length ? { parameter_errors: paramErrors } : {}),
-    bodies: res.bodies.map((b) => ({ name: b.name, size_mm: b.max.map((v, i) => r2(v - b.min[i])), min: b.min.map(r2), max: b.max.map(r2), volume_mm3: r2(b.volume) })),
-    ...(res.bodies.length ? {} : { note: 'The model has no solid bodies.' }),
-  };
-}
+const SYSTEM = `${GUIDE}
 
-function describeSelection() {
-  const lines = [];
-  for (const p of store.sel.picks) {
-    const d = act.descOf(p);
-    const body = act.bodyOf(p);
-    if (!d || !body) continue;
-    if (p.kind === 'face') lines.push(`- face on ${body.name}: ${d.n ? `flat, normal [${d.n.map(r2)}]` : d.t.toLowerCase()}, centre [${d.c.map(r2)}], area ${r2(d.a)} mm2. Selector: {"near": [${d.c.map(r2)}]${d.n ? `, "normal": "${normalName(d.n)}"` : ''}}`);
-    else lines.push(`- edge on ${body.name}: ${d.t.toLowerCase()}, from [${d.s.map(r2)}] to [${d.e.map(r2)}], midpoint [${d.m.map(r2)}], length ${r2(d.l)} mm. Selector: {"near": [${d.m.map(r2)}]}`);
-  }
-  const f = store.doc.features.find((x) => x.id === store.sel.feature);
-  if (f) lines.push(`- timeline feature selected: "${f.name || f.type}" (id ${f.id})`);
-  return lines.length ? `WHAT THE PERSON HAS SELECTED (they may say "this" or "here"):\n${lines.join('\n')}` : '';
-}
-
-function normalName(n) {
-  const i = n.findIndex((c) => Math.abs(c) > 0.999);
-  return i < 0 ? '' : `${n[i] > 0 ? '+' : '-'}${'xyz'[i]}`;
-}
+YOU ARE THE BUILT-IN ASSISTANT
+You live in Caliper's side panel. Each request comes with the current state (the same data get_state returns) and a picture of exactly what the person sees. Reply in one or two plain sentences, with no markdown and no JSON.`;
 
 function context() {
-  const { example, ...doc } = store.doc;
-  const parts = [`CURRENT MODEL:\n${JSON.stringify(doc)}`, `BUILD REPORT:\n${JSON.stringify(buildReport(store.results))}`];
-  const sel = describeSelection();
-  if (sel) parts.push(sel);
-  return parts.join('\n\n');
+  return `CURRENT STATE:\n${JSON.stringify(stateSnapshot({ include: ['document', 'build', 'view'] }))}`;
 }
 
-// ---------- tools ----------
-function checkFeatures(list) {
-  if (!Array.isArray(list)) throw new Error('"features" must be an array of feature objects.');
-  for (const f of list) {
-    if (!f || typeof f !== 'object' || !f.type) throw new Error('Every feature needs a "type".');
-    if (!FEATURES[f.type]) throw new Error(`Unknown feature type "${f.type}". Valid types: ${Object.keys(FEATURES).join(', ')}.`);
+function currentView() {
+  try {
+    const shot = act.app.viewport.capture({ view: 'current', width: 1024, height: 768 });
+    return shot.dataUrl.split(',')[1];
+  } catch {
+    return null;
   }
 }
+const b64ToBlob = (b64) => {
+  const s = atob(b64);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return new Blob([out], { type: 'image/png' });
+};
 
-async function runTool(name, input, turn) {
-  if (store.mode.kind !== 'model') act.leaveMode();
-  const first = !turn.changed;
-  if (name === 'set_model') {
-    checkFeatures(input.features);
-    replaceDoc({ name: input.name || store.doc.name, params: input.params || [], features: input.features }, { undoable: first });
-  } else if (name === 'edit_model') {
-    if (input.upsert) checkFeatures(input.upsert);
-    const before = JSON.stringify(store.doc);
-    update(
-      (doc) => {
-        for (const [k, v] of Object.entries(input.set_params || {})) {
-          const p = doc.params.find((x) => x.name === k);
-          if (p) p.value = String(v);
-          else doc.params.push({ name: k, value: String(v) });
-        }
-        const drop = new Set(input.remove || []);
-        if (drop.size) doc.features = doc.features.filter((f) => !drop.has(f.id));
-        let at = input.after ? doc.features.findIndex((f) => f.id === input.after) : -1;
-        for (const f of input.upsert || []) {
-          const i = f.id ? doc.features.findIndex((x) => x.id === f.id) : -1;
-          if (i >= 0) doc.features[i] = f;
-          else if (at >= 0) doc.features.splice(++at, 0, f);
-          else doc.features.push(f);
-        }
-        const fixed = normalize(doc);
-        doc.params = fixed.params;
-        doc.features = fixed.features;
-      },
-      { quiet: !first },
-    );
-    if (JSON.stringify(store.doc) === before) return { ...buildReport(store.results), note: 'Nothing changed: the edit matched the current model.' };
-  } else throw new Error(`Unknown tool "${name}".`);
-  turn.changed = true;
-  turn.steps++;
-  turn.onStep?.('Rebuilding…');
-  const res = await act.app.rebuildNow();
-  const report = buildReport(res);
-  turn.lastReport = report;
-  turn.onStep?.(report.ok ? 'Model updated' : `Model updated, ${report.errors.length + (report.parameter_errors?.length || 0)} problem${report.errors.length === 1 ? '' : 's'} to fix`);
-  return report;
+function toolList(max = Infinity, noImages = false) {
+  const list = TOOLS.filter((t) => !NOT_IN_APP.has(t.name) && !(noImages && t.name === 'screenshot'));
+  list.sort((a, b) => (PRIORITY.indexOf(a.name) + 1 || 99) - (PRIORITY.indexOf(b.name) + 1 || 99));
+  return list.slice(0, max);
+}
+
+async function call(name, input, turn, ctx) {
+  turn.onStep?.(STEP_LABEL[name] || name);
+  const depth = store.undoStack.length;
+  const res = await runTool(name, input, { by: 'Assistant', transport: ctx.transport, noImages: ctx.noImages }, turn.signal);
+  if (store.undoStack.length !== depth) {
+    turn.changed = true;
+    turn.undoSteps += store.undoStack.length - depth;
+  }
+  if (name === 'set_model' || name === 'edit_model') {
+    const report = (() => {
+      try {
+        return JSON.parse(res.content.find((c) => c.type === 'text')?.text || '{}');
+      } catch {
+        return {};
+      }
+    })();
+    const n = (report.errors?.length || 0) + (report.parameter_errors?.length || 0);
+    turn.onStep?.(n ? `Model updated, ${n} problem${n === 1 ? '' : 's'} to fix` : 'Model updated');
+  }
+  return res;
 }
 
 // ---------- backends ----------
 async function askClaudeArtifact(text, turn, signal, onText) {
-  const turns = [{ role: 'user', content: GUIDE }, ...state.turns.slice(-12), { role: 'user', content: `${context()}\n\nREQUEST: ${text}` }];
-  const tools = TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.schema, execute: (input) => runTool(t.name, input || {}, turn) }));
-  const out = await state.sample(turns, { tools, signal, onText: ({ text: whole }) => onText(whole) });
+  const view = state.sampleImages ? currentView() : null;
+  const turns = [{ role: 'user', content: SYSTEM }, ...state.turns.slice(-12), { role: 'user', content: `${context()}\n\n${view ? 'The attached image is what the person sees right now.\n\n' : ''}REQUEST: ${text}` }];
+  const ctx = { transport: 'artifact', noImages: true };
+  const tools = toolList(state.maxTools || 8, true).map((t) => ({
+    name: t.name,
+    description: t.description.slice(0, 1000),
+    inputSchema: t.inputSchema,
+    execute: async (input) => {
+      const res = await call(t.name, input || {}, turn, ctx);
+      const out = res.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n').slice(0, 30000);
+      if (res.isError) throw new Error(out);
+      return out;
+    },
+  }));
+  const opts = { tools, signal, onText: ({ text: whole }) => onText(whole) };
+  if (view) opts.images = [b64ToBlob(view)];
+  const out = await state.sample(turns, opts);
   state.turns.push({ role: 'user', content: text }, { role: 'assistant', content: out.text });
   return out.text;
 }
 
+const apiContent = (res) => res.content.map((c) => (c.type === 'image' ? { type: 'image', source: { type: 'base64', media_type: c.mimeType || 'image/png', data: c.data } } : { type: 'text', text: c.text || '' }));
+
 async function askClaudeApi(text, turn, signal, onText) {
   const client = new Anthropic({ apiKey: state.apiKey, dangerouslyAllowBrowser: true });
-  const tools = TOOLS.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema }));
+  const tools = toolList().map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
   const messages = state.apiMessages;
   const mark = messages.length;
-  messages.push({ role: 'user', content: `${context()}\n\nREQUEST: ${text}` });
+  const view = currentView();
+  messages.push({
+    role: 'user',
+    content: [
+      ...(view ? [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: view } }, { type: 'text', text: 'Above: what the person sees right now.' }] : []),
+      { type: 'text', text: `${context()}\n\nREQUEST: ${text}` },
+    ],
+  });
+  const ctx = { transport: 'inapp', noImages: false };
   let shown = '';
   try {
-    for (let round = 0; round < 8; round++) {
+    for (let round = 0; round < 16; round++) {
       const stream = client.beta.messages.stream(
         {
           model: state.model,
           max_tokens: 64000,
-          system: [{ type: 'text', text: GUIDE, cache_control: { type: 'ephemeral' } }],
+          system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
           thinking: { type: 'adaptive' },
           output_config: { effort: 'medium' },
           // If a safety classifier declines, let the API retry on a fallback model instead of stopping.
@@ -200,12 +198,9 @@ async function askClaudeApi(text, turn, signal, onText) {
       const calls = message.content.filter((b) => b.type === 'tool_use');
       if (!calls.length) break;
       const results = [];
-      for (const call of calls) {
-        try {
-          results.push({ type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(await runTool(call.name, call.input || {}, turn)) });
-        } catch (e) {
-          results.push({ type: 'tool_result', tool_use_id: call.id, content: `Error: ${e.message}`, is_error: true });
-        }
+      for (const c of calls) {
+        const res = await call(c.name, c.input || {}, turn, ctx);
+        results.push({ type: 'tool_result', tool_use_id: c.id, content: apiContent(res), ...(res.isError ? { is_error: true } : {}) });
       }
       messages.push({ role: 'user', content: results });
     }
@@ -295,7 +290,8 @@ async function send(text) {
   const chip = h('span', { class: 'step' }, '');
   const turn = {
     changed: false,
-    steps: 0,
+    undoSteps: 0,
+    signal: ctl.signal,
     onStep: (label) => {
       if (!chip.isConnected) out.steps.append(chip);
       chip.textContent = label;
@@ -333,11 +329,13 @@ async function send(text) {
               class: 'link-btn',
               type: 'button',
               onclick: (ev) => {
-                import('./store.js').then((m) => m.undo());
-                ev.target.replaceWith(h('span', { class: 'muted' }, 'Change undone'));
+                import('./store.js').then((m) => {
+                  for (let i = 0; i < turn.undoSteps; i++) m.undo();
+                });
+                ev.target.replaceWith(h('span', { class: 'muted' }, turn.undoSteps > 1 ? 'Changes undone' : 'Change undone'));
               },
             },
-            'Undo this change',
+            turn.undoSteps > 1 ? 'Undo these changes' : 'Undo this change',
           ),
         ),
       );
@@ -410,6 +408,8 @@ export async function initAssistant() {
     if (sample) {
       const limits = await sample.limits().catch(() => null);
       if (limits && !limits.tools) sample = null;
+      state.sampleImages = !!limits?.images;
+      state.maxTools = limits?.tools?.maxCount || 8;
     }
   } catch {
     sample = null;

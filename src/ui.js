@@ -25,6 +25,8 @@ export function h(tag, props, ...kids) {
 const svg = (d, extra = '') => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}${extra}</svg>`;
 export const ICON = {
   sketch: svg('<path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/>'),
+  import: svg('<path d="M12 3v11M7.500 9.500L12 14l4.500-4.500"/><path d="M4 15v4h16v-4"/>'),
+  agent: svg('<rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M3 13v2M21 13v2"/>'),
   box: svg('<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>'),
   cylinder: svg('<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/>'),
   sphere: svg('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12c0 1.9 3.8 3.4 8.5 3.4s8.5-1.5 8.5-3.4"/>'),
@@ -60,7 +62,10 @@ export const ICON = {
 };
 
 const TOOLBAR = [
-  [['sketch', 'Sketch', 'Draw a 2D profile on a plane or a flat face']],
+  [
+    ['sketch', 'Sketch', 'Draw a 2D profile on a plane or a flat face'],
+    ['import', 'Import', 'Bring in an STL file (or drop one onto the view)'],
+  ],
   [
     ['box', 'Box', 'Add a box'],
     ['cylinder', 'Cylinder', 'Add a cylinder'],
@@ -445,7 +450,7 @@ function inspectorSignature() {
   const shape = sk && sel.shape ? sk.shapes.find((s) => s.id === sel.shape) : null;
   const shapeOf = (o) => (o ? Object.keys(o).sort().join(',') + JSON.stringify([o.type, o.kind, o.extent, o.face !== undefined, o.plane, o.hole, o.suppressed, o.sketch, o.features, o.op, o.side, o.axis, o.dir, o.dir2, o.copy]) : '');
   const sels = f ? JSON.stringify([f.edges && (f.edges.pick ? f.edges.pick.length : f.edges), f.faces && (f.faces.pick ? f.faces.pick.length : f.faces), f.face && f.face.pick && f.face.pick.length]) : '';
-  return [mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
+  return [store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
 }
 
 function renderInspector(force = false) {
@@ -512,6 +517,7 @@ function renderInspector(force = false) {
       h('div', { class: 'insp-head' }, h('span', { class: 'insp-ico', html: ICON[f.type] || ICON.box }), name, h('span', { class: 'insp-tag' }, def.label)),
       err ? h('div', { class: 'insp-error', role: 'alert' }, h('span', { html: ICON.warn }), h('span', {}, err)) : null,
       f.suppressed ? h('div', { class: 'insp-warn' }, 'Suppressed: this feature is skipped until you turn it back on.') : null,
+      !err && info[f.id]?.note ? h('p', { class: 'insp-note' }, info[f.id].note) : null,
       ...fieldRows(f, def.fields, setter, 'f'),
     ];
     if (f.type === 'sketch') {
@@ -690,8 +696,8 @@ function bindMenus(fileActions) {
 export function initUI(fileActions) {
   renderToolbar();
   bindMenus(fileActions);
-  $('undo').addEventListener('click', undo);
-  $('redo').addEventListener('click', redo);
+  $('undo').addEventListener('click', () => undo());
+  $('redo').addEventListener('click', () => redo());
   $('doc-name').addEventListener('input', () => {
     selfEdit = true;
     update((doc) => (doc.name = $('doc-name').value || 'Untitled part'), { key: 'docname' });

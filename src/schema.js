@@ -201,6 +201,48 @@ export const FEATURES = {
       { key: 'features', label: 'Mirror', type: 'tools', optional: 'Whole bodies' },
     ],
   },
+  import: {
+    label: 'Import',
+    fields: [
+      {
+        key: 'mode',
+        label: 'Bring in as',
+        type: 'select',
+        options: [
+          ['auto', 'Automatic'],
+          ['solid', 'Exact solid (editable faces)'],
+          ['mesh', 'Mesh (fast, large files)'],
+        ],
+        def: 'auto',
+      },
+      {
+        key: 'units',
+        label: 'File units',
+        type: 'select',
+        options: [
+          ['mm', 'Millimetres'],
+          ['cm', 'Centimetres'],
+          ['m', 'Metres'],
+          ['in', 'Inches'],
+        ],
+        def: 'mm',
+      },
+      { key: 'scale', label: 'Scale', type: 'expr', def: 1, hint: '2 doubles every dimension' },
+      {
+        key: 'align',
+        label: 'Placement',
+        type: 'select',
+        options: [
+          ['bed', 'Centre on the bed'],
+          ['original', 'Keep file coordinates'],
+        ],
+        def: 'bed',
+      },
+      { ...atField, hint: 'moves it after placement' },
+      rotField,
+      opField,
+    ],
+  },
   move: {
     label: 'Move',
     fields: [
@@ -277,7 +319,7 @@ export const SHAPES = {
   },
 };
 
-export const MAKES_TOOL = new Set(['extrude', 'revolve', 'box', 'cylinder', 'sphere', 'cone', 'torus']);
+export const MAKES_TOOL = new Set(['extrude', 'revolve', 'box', 'cylinder', 'sphere', 'cone', 'torus', 'import']);
 
 export const DEFAULTS = {
   box: { w: 40, d: 30, h: 20, at: [0, 0, 0] },

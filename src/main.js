@@ -6,7 +6,9 @@ import { Sketcher } from './sketcher.js';
 import { store, on, emit, update, select, loadSaved, visibleDoc, featureById, replaceDoc, undo, redo, setMode, EXAMPLE_DOC, normalize } from './store.js';
 import { initUI, toast } from './ui.js';
 import { initAssistant } from './assistant.js';
+import { initAgentPanel } from './agent/panel.js';
 import { saveFile, safeName } from './export.js';
+import { embedFiles, absorbFiles } from './files.js';
 import * as act from './actions.js';
 
 const $ = (id) => document.getElementById(id);
@@ -44,7 +46,8 @@ function scheduleRebuild() {
 
 function rebuildNow() {
   return new Promise((resolve) => {
-    waiters.push(resolve);
+    if (store.kernel.state === 'error') return resolve(null);
+    waiters.push(resolve); // resolved by the next finished rebuild (or once the kernel is ready)
     clearTimeout(timer);
     runRebuild();
   });
@@ -235,7 +238,7 @@ async function exportFile(kind) {
     } else {
       const out = await kernel.exportSTEP(null);
       const msg = await saveFile(`${base}.step`, out.buffer, 'model/step');
-      if (msg) toast(msg);
+      if (msg) toast(out.skipped?.length ? `${msg}. Left out ${out.skipped.join(', ')}: mesh bodies cannot go in a STEP file.` : msg);
     }
   } catch (e) {
     toast(e.message || 'Export failed.', 'error');
@@ -252,10 +255,12 @@ const fileActions = {
     viewport.fitted = false;
   },
   open: () => $('open-file').click(),
+  import: () => $('import-file').click(),
   save: async () => {
     try {
       const { example, ...doc } = store.doc;
-      const msg = await saveFile(`${safeName(store.doc.name)}.caliper.json`, JSON.stringify(doc, null, 2), 'application/json');
+      const full = await embedFiles(doc); // imported STLs travel inside the project file
+      const msg = await saveFile(`${safeName(store.doc.name)}.caliper.json`, JSON.stringify(full, null, full.files ? 0 : 2), 'application/json');
       if (msg) toast(msg);
     } catch (e) {
       toast(e.message, 'error');
@@ -265,19 +270,56 @@ const fileActions = {
   step: () => exportFile('step'),
 };
 
-$('open-file').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
+async function openProject(file) {
   try {
     const doc = JSON.parse(await file.text());
     if (!doc || !Array.isArray(doc.features)) throw new Error('not a Caliper project');
-    replaceDoc(normalize(doc));
+    replaceDoc(normalize(await absorbFiles(doc)));
     viewport.fitted = false;
     toast(`Opened ${file.name}`);
   } catch {
     toast('That file is not a Caliper project (.caliper.json).', 'error');
   }
+}
+$('open-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (file) openProject(file);
+});
+$('import-file').addEventListener('change', (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  if (files.length) act.importFiles(files);
+});
+
+// Drop STL files (or a saved project) anywhere on the window.
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth++;
+  document.body.classList.add('dropping');
+});
+window.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    document.body.classList.remove('dropping');
+  }
+});
+window.addEventListener('dragover', (e) => {
+  if (hasFiles(e)) e.preventDefault();
+});
+window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dropping');
+  const files = [...e.dataTransfer.files];
+  const project = files.find((f) => /\.json$/i.test(f.name));
+  if (project) return openProject(project);
+  const stls = files.filter((f) => /\.stl$/i.test(f.name));
+  if (stls.length) act.importFiles(stls);
+  else toast('Drop .stl files to import them, or a .caliper.json project to open it.', 'error');
 });
 
 // ---------- theme ----------
@@ -288,6 +330,7 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ref
 // ---------- go ----------
 initUI(fileActions);
 initAssistant();
+const agentLink = initAgentPanel();
 document.fonts?.ready.then(() => viewport.resize());
 
 kernel
@@ -299,6 +342,7 @@ kernel
     store.kernel = { state: 'ready', progress: 1, message: '' };
     emit('kernel');
     runRebuild();
+    emit('kernel-ready');
     kernel
       .loadFont()
       .then((ok) => {
@@ -313,7 +357,8 @@ kernel
   .catch((e) => {
     store.kernel = { state: 'error', progress: 0, message: `The geometry kernel could not start (${e.message || 'unknown error'}). Reload the page to try again.` };
     emit('kernel');
+    waiters.splice(0).forEach((w) => w(null));
   });
 
 // Small hook for automated checks.
-window.caliper = { store, viewport, act, rebuildNow };
+window.caliper = { store, viewport, act, rebuildNow, agentLink };
