@@ -1,5 +1,5 @@
 // End-to-end check of the MCP bridge, the way an agent uses it: real MCP clients (stdio and HTTP), the
-// bridge, and a real browser tab running Caliper. Needs a build (npm run build) and Playwright.
+// bridge, and a real browser tab running Caliper. Needs a build (npm run bundle) and Playwright.
 //   node scripts/e2e-bridge.mjs [screenshots dir]
 import fs from 'node:fs';
 import os from 'node:os';

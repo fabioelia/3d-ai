@@ -10,7 +10,7 @@ const dist = path.join(root, 'dist');
 const sh = (cmd, cwd = root) => execSync(cmd, { cwd, stdio: ['ignore', 'pipe', 'inherit'] }).toString().trim();
 
 for (const f of ['index.html', 'kernel.wasm', 'mesh.wasm', 'font.ttf']) {
-  if (!fs.existsSync(path.join(dist, f))) throw new Error(`dist/${f} is missing. Run "npm run build" first.`);
+  if (!fs.existsSync(path.join(dist, f))) throw new Error(`dist/${f} is missing. Run "npm run bundle" first.`);
 }
 const remote = sh('git remote get-url origin');
 const rev = sh('git rev-parse --short HEAD');

@@ -35,7 +35,7 @@ Then ask: *"Open Caliper and make me a wall bracket for a 25 mm pipe."* The agen
 
 How the page finds the bridge:
 
-- Run from a built checkout (`npm run build` first), the bridge serves Caliper itself at `http://127.0.0.1:7429/`, and that page connects automatically.
+- Run from a built checkout (`npm run bundle` first), the bridge serves Caliper itself at `http://127.0.0.1:7429/`, and that page connects automatically.
 - Otherwise it opens the hosted app with a connection code in the link (`…/3d-ai/#bridge=7429-…`). Your browser may ask once to allow the page to reach this computer.
 - Or open the **Agent** menu in Caliper and paste the code the agent gives you.
 
@@ -64,7 +64,8 @@ Security: the bridge listens on 127.0.0.1 only, rejects other host names and bro
 ```bash
 npm install
 npm run dev        # http://127.0.0.1:5173
-npm run build      # dist/: index.html (single file), kernel.wasm, mesh.wasm, font.ttf
+npm run bundle     # dist/: index.html (single file), kernel.wasm, mesh.wasm, font.ttf
+                   # (named `bundle`, not `build`, so `npx github:…` installs only the bridge)
 npm run bridge     # the MCP bridge in HTTP mode, serving the build at http://127.0.0.1:7429
 npm run preview    # serve the build on http://127.0.0.1:4173
 ```
@@ -128,7 +129,7 @@ Picked faces and edges are stored with their position in the body *and* a geomet
 
 ```bash
 npm test                 # kernel and STL import: documents checked against hand-computed volumes and bounds
-npm run build && node scripts/make-artifact.mjs && npm run preview &
+npm run bundle && node scripts/make-artifact.mjs && npm run preview &
 npm run test:e2e         # headless Chromium: modelling flows, import, exports, built-in assistant plumbing
 npm run test:bridge      # real MCP clients (stdio and HTTP) driving a real browser tab through the bridge
 ```

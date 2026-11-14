@@ -5,13 +5,13 @@
   "scripts": {
     "test": "node scripts/test-kernel.mjs && node scripts/test-import.mjs",
     "dev": "node scripts/prepare-kernel.mjs && vite",
-    "build": "node scripts/prepare-kernel.mjs && vite build",
     "preview": "vite preview",
-    "artifact": "npm run build && node scripts/make-artifact.mjs",
+    "artifact": "npm run bundle && node scripts/make-artifact.mjs",
     "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-assistant.cjs",
-    "deploy": "npm run build && node scripts/deploy-pages.mjs",
+    "deploy": "npm run bundle && node scripts/deploy-pages.mjs",
     "bridge": "node bridge/server.mjs --http",
-    "test:bridge": "node scripts/e2e-bridge.mjs"
+    "test:bridge": "node scripts/e2e-bridge.mjs",
+    "bundle": "node scripts/prepare-kernel.mjs && vite build"
   },
   "keywords": [],
   "author": "",
