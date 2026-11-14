@@ -3,7 +3,7 @@
 
 // Imports up to this many triangles become exact solids (faces you can sketch on, fillet, shell).
 // Above it, booleans on a triangle-per-face solid get slow, so the file becomes a mesh body.
-export const SOLID_TRIANGLE_LIMIT = 6000;
+export const SOLID_TRIANGLE_LIMIT = 2500;
 
 // ---------- parsing ----------
 function isBinary(bytes) {
@@ -34,9 +34,16 @@ export function parseSTL(bytes) {
     while ((m = re.exec(text))) raw.push(+m[1], +m[2], +m[3]);
     if (raw.length % 9) throw new Error('This text STL has a facet without three vertices.');
   }
+  if (!(raw.length / 9)) throw new Error('This STL file has no triangles.');
+  return weldSoup(raw, 'STL');
+}
+
+// Triangle soup (9 numbers per triangle) -> shared vertices and index triangles. Every mesh format ends
+// up here, then goes through the same repair and solid/mesh/reference decision.
+export function weldSoup(raw, label = 'mesh') {
   const triangles = raw.length / 9;
-  if (!triangles) throw new Error('This STL file has no triangles.');
-  if (!raw.every(Number.isFinite)) throw new Error('This STL file has invalid coordinates.');
+  if (!triangles) throw new Error(`This ${label} file has no triangles.`);
+  if (!raw.every(Number.isFinite)) throw new Error(`This ${label} file has invalid coordinates.`);
   // Weld identical corners so triangles share vertices.
   const key = new Map();
   const positions = [];

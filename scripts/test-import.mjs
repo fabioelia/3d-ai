@@ -127,6 +127,30 @@ k.evaluate({ features: [{ id: 'i', type: 'import', file: 'open' }] });
 ok(k.exportSTL(null, 'standard').triangles === 10, 'a reference mesh exports exactly as it came in');
 ok(/reference mesh/.test(k.measure('i').a.kind), 'measure knows it is a reference mesh');
 
+// Other formats.
+const { detectFormat } = await import('../src/kernel/formats.js');
+const enc = (t) => new TextEncoder().encode(t);
+const objText = cubeP.map((p) => `v ${p.join(' ')}`).join('\n') + '\n' + cubeT.map((t) => `f ${t.map((i) => `${i + 1}/1/1`).join(' ')}`).join('\n');
+k.addFile('obj', enc(`# cube\no cube\n${objText}\n`));
+res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'obj', fileName: 'cube.obj' }] }).result;
+ok(!errs(res).length && near(res.volume, 1000, 0.01) && !res.bodies[0].isMesh, `OBJ imports as a solid (${errs(res)}; vol ${res.volume.toFixed(0)})`);
+const tmf = `<?xml version="1.0"?><model unit="centimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><object id="1" type="model"><mesh><vertices>${cubeP.map((p) => `<vertex x="${p[0] / 10}" y="${p[1] / 10}" z="${p[2] / 10}"/>`).join('')}</vertices><triangles>${cubeT.map((t) => `<triangle v1="${t[0]}" v2="${t[1]}" v3="${t[2]}"/>`).join('')}</triangles></mesh></object></resources><build><item objectid="1" transform="1 0 0 0 1 0 0 0 1 5 0 0"/></build></model>`;
+k.addFile('3mf', enc(tmf));
+res = k.evaluate({ features: [{ id: 'i', type: 'import', file: '3mf', fileName: 'cube.3mf', align: 'original' }] }).result;
+ok(!errs(res).length && near(res.volume, 1000, 0.01) && near(res.min[0], 50, 0.01), `3MF model XML with centimetre units and a build transform (${errs(res)}; vol ${res.volume.toFixed(0)}, x from ${res.min?.[0]})`);
+// A mesh-only STEP (AP242 tessellated, as Fusion exports): the cube as triangle strips over a point list.
+const strips = cubeT.map((t) => `(${t.map((i) => i + 1).join(',')})`).join(',');
+const stepMesh = `ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('AP242'));\nENDSEC;\nDATA;\n#10=( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );\n#13=TESSELLATED_SOLID('cube',(#14),$);\n#14=COMPLEX_TRIANGULATED_FACE('',#15,8,(),$,(),(${strips}),());\n#15=COORDINATES_LIST('',8,(${cubeP.map((p) => `(${p.map((x) => x.toFixed(1)).join(',')})`).join(',')}));\nENDSEC;\nEND-ISO-10303-21;\n`;
+k.addFile('steptess', enc(stepMesh));
+ok(detectFormat(enc(stepMesh)) === 'step' && detectFormat(enc(objText)) === 'obj' && detectFormat(enc(tmf)) === '3mf' && detectFormat(bracket) === 'stl', 'formats are recognised by their content');
+res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'steptess', fileName: 'cube.step' }] }).result;
+ok(!errs(res).length && near(res.volume, 1000, 0.01) && /holds a mesh rather than exact surfaces/.test(res.features.i.note), `mesh-only STEP imports (${errs(res)}; ${res.features.i.note?.slice(0, 70)})`);
+k.evaluate({ features: [{ id: 'b', type: 'box', w: 40, d: 20, h: 10 }, { id: 'f', type: 'fillet', edges: { parallel: 'z' }, radius: 3 }] });
+k.addFile('stepbrep', new Uint8Array((await k.exportSTEP()).buffer));
+res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'stepbrep', fileName: 'part.step' }] }).result;
+const cyl = res.bodies[0]?.faces.filter((f) => f.t === 'CYLINDER').length;
+ok(!errs(res).length && !res.bodies[0].isMesh && cyl === 4 && /exact solid/.test(res.features.i.note), `a STEP with real surfaces imports exactly: ${cyl} cylindrical faces (${res.features.i.note?.slice(0, 60)})`);
+
 // Zips, as model sites deliver them.
 const { readZip, stlEntry, isZip } = await import('../src/zip.js');
 const zlib = await import('node:zlib');

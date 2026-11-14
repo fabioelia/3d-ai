@@ -4,6 +4,7 @@
 import { evalExpr, resolveParams } from '../expr.js';
 import { BASE_PLANES, frameFromFace, offsetFrame, toWorld, v3, axisVec } from '../frame.js';
 import { pathPoints } from '../sketchgeo.js';
+import { detectFormat, parseMesh, readSTEPSolid } from './formats.js';
 import { parseSTL, repairMesh, weldMesh, closedVolume, describeRepairs, meshToSTL, stlToSolid, stlToMesh, meshDisplay, meshTriangles, RawMesh, rawDisplay, SOLID_TRIANGLE_LIMIT } from './stl.js';
 
 const TOL = 1e-4;
@@ -740,7 +741,7 @@ export function createKernel(r) {
       }
 
       case 'import': {
-        if (!f.file) fail('Choose an STL file to import.');
+        if (!f.file) fail('Choose a file to import.');
         const bytes = files.get(f.file);
         if (!bytes) fail(`The file for this import${f.fileName ? ` (${f.fileName})` : ''} is not loaded. Import it again, or open the project file that contains it.`);
         const want = f.mode === 'solid' || f.mode === 'mesh' ? f.mode : 'auto';
@@ -748,10 +749,14 @@ export function createKernel(r) {
         let imp = importCache.get(key);
         if (!imp) {
           try {
-            const raw = parseSTL(bytes);
+            const format = detectFormat(bytes, f.fileName);
+            // STEP with real surfaces comes in exactly as it was modelled.
+            const stepSolid = format === 'step' ? readSTEPSolid(r, bytes) : null;
+            if (stepSolid) imp = { shape: want === 'mesh' ? asMesh(stepSolid) : stepSolid, kind: want === 'mesh' ? 'mesh' : 'solid', exact: true, format, triangles: 0, repairs: '', dropped: 0 };
+            const raw = stepSolid ? null : parseMesh(bytes, format);
             // Strict first; then merge vertices a hair apart (0.01, then 0.05 mm), well below what a
             // printer resolves, the way slicers tolerate sloppy exports.
-            const attempts = [0, 0.01, 0.05];
+            const attempts = stepSolid ? [] : [0, 0.01, 0.05];
             let lastError = null;
             for (const weld of attempts) {
               let parsed;
@@ -794,10 +799,11 @@ export function createKernel(r) {
               }
               if (shape && !imp) imp = { shape, kind, triangles: parsed.triangles, repairs: describeRepairs(parsed.stats), dropped };
             }
+            if (imp && !imp.format) imp.format = format;
             if (!imp && want !== 'solid') {
               // Beyond repair: keep it as a reference mesh, exactly as it came in.
               const kept = repairMesh(raw);
-              imp = { shape: new RawMesh(kept.positions, kept.indices), kind: 'reference', triangles: kept.triangles, repairs: '', dropped: 0, why: lastError };
+              imp = { shape: new RawMesh(kept.positions, kept.indices), kind: 'reference', format, triangles: kept.triangles, repairs: '', dropped: 0, why: lastError };
             }
             if (!imp) throw new Error(lastError || 'This STL file could not be read.');
           } catch (e) {
@@ -825,7 +831,10 @@ export function createKernel(r) {
         const [lo, hi] = shape.boundingBox.bounds;
         const size = hi.map((v, i) => Math.round((v - lo[i]) * 100) / 100).join(' × ');
         const fixes = [imp.repairs ? `Repaired the file: ${imp.repairs}.` : '', imp.dropped ? `Left out ${imp.dropped} piece${imp.dropped === 1 ? '' : 's'} that ${imp.dropped === 1 ? 'is' : 'are'} not closed.` : ''].filter(Boolean).join(' ');
-        rec.note =
+        const from = imp.format === 'step' && !imp.exact ? 'This STEP file holds a mesh rather than exact surfaces (Fusion\'s tessellated STEP export does this), so it came in like an STL. ' : '';
+        rec.note = imp.exact
+          ? `Imported from STEP as an exact solid (${topo(shape).faces.length.toLocaleString()} faces), ${size} mm, with its surfaces as they were modelled. You can sketch on its faces, fillet, shell and cut it.`
+          : from +
           (fixes ? `${fixes} ` : '') +
           (imp.kind === 'reference'
             ? `Imported as a reference mesh (${imp.triangles.toLocaleString()} triangles), ${size} mm, because the file is not a closed solid (it has faces folded through each other or missing). It can be moved, rotated, scaled, patterned, measured and exported to STL as it is, but not cut or joined with other bodies.`

@@ -132,7 +132,7 @@ function checkFeatures(list) {
   for (const f of list) {
     if (!f || typeof f !== 'object' || !f.type) throw new Error('Every feature needs a "type".');
     if (!FEATURES[f.type]) throw new Error(`Unknown feature type "${f.type}". Valid types: ${Object.keys(FEATURES).join(', ')}.`);
-    if (f.type === 'import' && f.file && !String(f.file).startsWith('stl_')) throw new Error('Import features get their "file" from import_stl; do not write file ids by hand.');
+    if (f.type === 'import' && f.file && !String(f.file).startsWith('stl_')) throw new Error('Import features get their "file" from import_file; do not write file ids by hand.');
   }
 }
 
@@ -291,15 +291,15 @@ const IMPL = {
     return rebuildReport(problems.length ? { problems } : {});
   },
 
-  async import_stl(args, ctx) {
+  async import_file(args, ctx) {
     await ready();
-    if (!args.data) return fail('import_stl reads files through the Caliper MCP bridge; it is not available here.');
+    if (!args.data) return fail('import_file reads files through the Caliper MCP bridge; it is not available here.');
     toModelMode(ctx.by);
     const item = { name: args.fileName || 'model.stl', bytes: fromB64(args.data) };
     const props = {};
     for (const k of ['mode', 'units', 'scale', 'align', 'at', 'rot', 'op']) if (args[k] !== undefined) props[k] = args[k];
     const added = await act.importFiles([item], { by: ctx.by, props });
-    if (!added.length) return fail(`${item.name} has no STL files Caliper could read.`);
+    if (!added.length) return fail(`${item.name} has no 3D files Caliper could read (STL, STEP, OBJ or 3MF).`);
     if (added.length === 1 && args.name) update((doc) => (doc.features.find((f) => f.id === added[0]).name = String(args.name)), { by: ctx.by, quiet: true });
     return rebuildReport({ added });
   },

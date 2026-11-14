@@ -156,9 +156,15 @@ function runClaude(hub, msg, inherit, send) {
   const dir = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'caliper', 'chat');
   fs.mkdirSync(dir, { recursive: true });
   const mcp = { mcpServers: { caliper: { type: 'http', url: `http://127.0.0.1:${hub.port}/mcp` } } };
+  // Images attached in the chat go in as one streamed user message (stdin); plain text as the prompt.
+  const images = (Array.isArray(msg.images) ? msg.images : [])
+    .filter((im) => /^image\/(png|jpeg|gif|webp)$/.test(im?.mediaType) && typeof im.data === 'string' && im.data.length < 8e6)
+    .slice(0, 6);
+  // Long messages (attached files) also go through stdin: a command-line argument is capped at 128 KB.
+  const viaStdin = images.length > 0 || String(msg.text || '').length > 60000;
   const args = [
     '-p',
-    String(msg.text || ''),
+    ...(viaStdin ? ['--input-format', 'stream-json'] : [String(msg.text || '')]),
     '--output-format',
     'stream-json',
     '--verbose',
@@ -179,7 +185,12 @@ function runClaude(hub, msg, inherit, send) {
   if (msg.model && /^[\w.-]{2,60}$/.test(msg.model)) args.push('--model', msg.model);
   let child;
   try {
-    child = spawn(CLAUDE_BIN, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...(inherit ? process.env : cleanEnv()), CALIPER_CHAT: '1' } });
+    child = spawn(CLAUDE_BIN, args, { cwd: dir, stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], env: { ...(inherit ? process.env : cleanEnv()), CALIPER_CHAT: '1' } });
+    if (viaStdin) {
+      const content = [...images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.data } })), { type: 'text', text: String(msg.text || 'Here is a picture.') }];
+      child.stdin.on('error', () => {});
+      child.stdin.end(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`);
+    }
   } catch (e) {
     send({ kind: 'error', message: `Could not start Claude Code: ${e.message}` });
     return () => {};
@@ -616,7 +627,7 @@ async function handleMcp(req, res, hub, sessions) {
 }
 
 // ---------- the MCP server an agent talks to ----------
-const INSTRUCTIONS = `Caliper is a browser CAD tool for 3D-printable parts, open in the person's browser. These tools let you see exactly what they see (get_state, screenshot), work on the same model they are editing (edit_model, set_model, import_stl), point at things (select, set_view, ask_user) and export files to this computer (export_file). Start with open_caliper if Caliper is not connected, then get_state. Look with screenshot after each change.
+const INSTRUCTIONS = `Caliper is a browser CAD tool for 3D-printable parts, open in the person's browser. These tools let you see exactly what they see (get_state, screenshot), work on the same model they are editing (edit_model, set_model, import_file), point at things (select, set_view, ask_user) and export files to this computer (export_file). Start with open_caliper if Caliper is not connected, then get_state. Look with screenshot after each change.
 
 ${GUIDE}`;
 
@@ -651,7 +662,8 @@ function createMcpServer(getBackend, key) {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
-    const { name } = req.params;
+    // import_stl was this tool's name before it took every format.
+    const name = req.params.name === 'import_stl' ? 'import_file' : req.params.name;
     const args = { ...(req.params.arguments || {}) };
     const backend = getBackend();
     try {
@@ -671,13 +683,13 @@ function createMcpServer(getBackend, key) {
         return text(JSON.stringify({ connected: true, pages: st.pages, agents: st.agents, open_at: st.local || st.hosted, hosted: st.hosted, connection_code: st.code, next: 'Call get_state to see the model.' }));
       }
       if (!TOOLS.some((t) => t.name === name)) return text(`Unknown tool "${name}".`, true);
-      if (name === 'import_stl') {
-        if (!args.path) return text('import_stl needs a path to an .stl file.', true);
+      if (name === 'import_file') {
+        if (!args.path) return text('import_file needs a path to a 3D file (STL, STEP, OBJ, 3MF or zip).', true);
         const file = path.resolve(process.cwd(), String(args.path).replace(/^~(?=$|\/)/, os.homedir()));
         if (!fs.existsSync(file)) return text(`There is no file at ${file}.`, true);
         const size = fs.statSync(file).size;
         if (size > 200 * 1024 * 1024) return text(`${file} is larger than 200 MB.`, true);
-        if (!/\.(stl|zip)$/i.test(file)) return text(`${path.basename(file)} is not an .stl or .zip file.`, true);
+        if (!/\.(stl|step|stp|obj|3mf|zip)$/i.test(file)) return text(`${path.basename(file)} is not a 3D file Caliper imports (STL, STEP, OBJ, 3MF, or a zip of them).`, true);
         args.data = fs.readFileSync(file).toString('base64');
         args.fileName = path.basename(file);
         delete args.path;

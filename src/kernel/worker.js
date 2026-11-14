@@ -4,6 +4,7 @@ import opencascade from 'replicad-opencascadejs';
 import Manifold from 'manifold-3d';
 import * as replicad from 'replicad';
 import { createKernel } from './evaluate.js';
+import { isZip, readZip, inflateRawWeb } from '../zip.js';
 
 let kernel = null;
 
@@ -29,7 +30,14 @@ self.onmessage = async ({ data }) => {
     } else if (type === 'font') {
       await replicad.loadFont(data.font);
     } else if (type === 'file') {
-      kernel.addFile(data.fileId, data.bytes);
+      let bytes = new Uint8Array(data.bytes);
+      // A 3MF is a zip; the kernel reads its model XML.
+      if (isZip(bytes)) {
+        const models = await readZip(bytes, inflateRawWeb, { accept: (n) => /\.model$/i.test(n) });
+        const main = models.find((e) => /3dmodel\.model$/i.test(e.path)) || models[0];
+        if (main) bytes = main.bytes;
+      }
+      kernel.addFile(data.fileId, bytes);
     } else if (type === 'evaluate') {
       const t = performance.now();
       const out = kernel.evaluate(data.doc);

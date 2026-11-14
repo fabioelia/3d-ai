@@ -18,7 +18,20 @@ const opt = (name) => {
 if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(args) + '\n');
 // Which of the parent session's variables reached this process.
 if (process.env.FAKE_CLAUDE_ENV_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_ENV_LOG, JSON.stringify({ CLAUDECODE: process.env.CLAUDECODE ?? null, CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null }) + '\n');
-const prompt = opt('-p') || '';
+// Messages with images or long attachments arrive on stdin as one streamed user message.
+let prompt = opt('-p') || '';
+let images = 0;
+if (args.includes('--input-format')) {
+  const line = await new Promise((resolve) => {
+    let buf = '';
+    process.stdin.on('data', (d) => (buf += d));
+    process.stdin.on('end', () => resolve(buf.trim()));
+  });
+  const content = JSON.parse(line).message.content;
+  images = content.filter((c) => c.type === 'image').length;
+  prompt = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+}
+if (process.env.FAKE_CLAUDE_PROMPTS) fs.appendFileSync(process.env.FAKE_CLAUDE_PROMPTS, JSON.stringify({ images, prompt }) + '\n');
 const session = opt('--resume') || crypto.randomUUID();
 const out = (o) => process.stdout.write(JSON.stringify({ ...o, session_id: session }) + '\n');
 const url = JSON.parse(opt('--mcp-config')).mcpServers.caliper.url;
@@ -50,6 +63,8 @@ await call('get_state', { include: ['build'] });
 if (/box/.test(prompt)) {
   await call('set_model', { name: 'Chat box', params: [{ name: 'size', value: '40' }], features: [{ id: 'box1', type: 'box', name: 'Block', w: 'size', d: 'size', h: 10 }] });
   say('I made a 40 mm box. Change size to resize it.');
+} else if (/attached/.test(prompt)) {
+  say(`I got ${images} image(s) and your files.`);
 } else if (/taller/.test(prompt)) {
   await call('edit_model', { patch: [{ id: 'box1', set: { h: 25 } }] });
   say('It is 25 mm tall now.');

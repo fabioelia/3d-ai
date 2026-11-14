@@ -4,8 +4,8 @@ import { Kernel } from './kernel/client.js';
 import { Viewport } from './viewport.js';
 import { Sketcher } from './sketcher.js';
 import { store, on, emit, update, select, loadSaved, visibleDoc, featureById, replaceDoc, undo, redo, setMode, EXAMPLE_DOC, normalize } from './store.js';
-import { initUI, toast } from './ui.js';
-import { initAssistant } from './assistant.js';
+import { initUI, toast, showTab } from './ui.js';
+import { initAssistant, attachFiles } from './assistant.js';
 import { initAgentPanel } from './agent/panel.js';
 import { saveFile, safeName } from './export.js';
 import { embedFiles, absorbFiles } from './files.js';
@@ -317,9 +317,23 @@ window.addEventListener('drop', (e) => {
   const files = [...e.dataTransfer.files];
   const project = files.find((f) => /\.json$/i.test(f.name));
   if (project) return openProject(project);
-  const stls = files.filter((f) => /\.(stl|zip)$/i.test(f.name));
+  // Pictures dropped anywhere go to the chat, for Claude to look at.
+  const pictures = files.filter((f) => f.type?.startsWith('image/'));
+  if (pictures.length) {
+    attachFiles(pictures).then((ok) => {
+      if (ok) {
+        showTab('assistant');
+        toast(`Attached ${pictures.length === 1 ? 'the image' : `${pictures.length} images`} to your next chat message.`);
+      } else toast('Images can be attached to the chat in the hosted app (Claude Code over MCP).', 'error');
+    });
+    if (!files.some((f) => /\.(stl|zip)$/i.test(f.name))) return;
+  }
+  const stls = files.filter((f) => /\.(stl|step|stp|obj|3mf|zip)$/i.test(f.name));
+  // Other files (notes, schematics) go to the chat for Claude to read.
+  const docs = files.filter((f) => !pictures.includes(f) && !stls.includes(f));
+  if (docs.length) attachFiles(docs).then((ok) => ok && (showTab('assistant'), toast(`Attached ${docs.map((f) => f.name).join(', ')} to your next chat message.`)));
   if (stls.length) act.importFiles(stls);
-  else toast('Drop .stl files (or a .zip of them) to import them, or a .caliper.json project to open it.', 'error');
+  else if (!pictures.length && !docs.length) toast('Drop 3D files (STL, STEP, OBJ, 3MF or a zip) to import them, other files to share them with Claude, or a .caliper.json project to open it.', 'error');
 });
 
 // ---------- theme ----------

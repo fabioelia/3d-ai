@@ -49,7 +49,7 @@
           <button type="button" data-file="new">New empty part</button>
           <button type="button" data-file="example">Open the example part</button>
           <hr>
-          <button type="button" data-file="import">Import STL or zip…</button>
+          <button type="button" data-file="import">Import 3D file (STL, STEP, OBJ, 3MF, zip)…</button>
           <button type="button" data-file="open">Open project…</button>
           <button type="button" data-file="save">Save project (.json)</button>
           <hr>
@@ -128,7 +128,9 @@
         <div class="chat-log" id="chat-log" aria-live="polite"></div>
         <p class="as-empty" id="chat-empty">Describe a part and Claude builds a first draft you can edit, or ask for changes to this one. Select a face or edge first to say “this”.</p>
         <div class="suggests" id="chat-suggest"></div>
+        <div class="chat-attach" id="chat-attach" hidden></div>
         <form class="chat-form" id="chat-form">
+          <button class="icon-btn" id="chat-file-btn" type="button" title="Attach images, 3D files, zips or text files such as notes and schematics (or drop / paste them here)" aria-label="Attach files"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11.500l-8.300 8.300a5 5 0 01-7.100-7.100l8.900-8.900a3.300 3.300 0 014.700 4.700l-8.900 8.900a1.700 1.700 0 01-2.400-2.400l8.300-8.300"/></svg></button>
           <textarea class="in" id="chat-input" rows="2" aria-label="Message to the assistant" placeholder="Describe a part, or a change to this one"></textarea>
           <button class="btn primary" id="chat-send" type="submit">Send</button>
           <button class="btn" id="chat-stop" type="button" hidden>Stop</button>
@@ -145,7 +147,8 @@
   </nav>
 </div>
 <input type="file" id="open-file" accept=".json,application/json" hidden>
-<input type="file" id="import-file" accept=".stl,.zip,model/stl,application/zip" multiple hidden>
+<input type="file" id="import-file" accept=".stl,.step,.stp,.obj,.3mf,.zip,model/stl,model/3mf,application/zip" multiple hidden>
+<input type="file" id="chat-file" multiple hidden>
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>

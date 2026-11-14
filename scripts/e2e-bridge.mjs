@@ -19,7 +19,8 @@ const PORT = 7541;
 const chatLog = path.join(work, 'claude-args.log');
 const envLog = path.join(work, 'claude-env.log');
 // As when Claude Code starts the bridge: its own session variables are in the environment.
-const env = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_OAUTH_TOKEN: 'parent-session-token', CLAUDE_CONFIG_DIR: path.join(work, 'claude-config'), XDG_CONFIG_HOME: path.join(work, 'config'), CALIPER_NO_OPEN: '1', CALIPER_PORT: String(PORT), CALIPER_CLAUDE_BIN: path.join(ROOT, 'scripts/fake-claude.mjs'), FAKE_CLAUDE_LOG: chatLog, FAKE_CLAUDE_ENV_LOG: envLog };
+const promptLog = path.join(work, 'claude-prompts.log');
+const env = { ...process.env, FAKE_CLAUDE_PROMPTS: promptLog, CLAUDECODE: '1', CLAUDE_CODE_OAUTH_TOKEN: 'parent-session-token', CLAUDE_CONFIG_DIR: path.join(work, 'claude-config'), XDG_CONFIG_HOME: path.join(work, 'config'), CALIPER_NO_OPEN: '1', CALIPER_PORT: String(PORT), CALIPER_CLAUDE_BIN: path.join(ROOT, 'scripts/fake-claude.mjs'), FAKE_CLAUDE_LOG: chatLog, FAKE_CLAUDE_ENV_LOG: envLog };
 
 let failed = 0;
 const ok = (c, m) => {
@@ -51,7 +52,7 @@ fs.writeFileSync(path.join(work, 'spacer.stl'), Buffer.from(k.exportSTL(null, 's
 
 const A = await agent('claude-code');
 const tools = (await A.client.listTools()).tools.map((t) => t.name);
-ok(['open_caliper', 'get_state', 'screenshot', 'edit_model', 'import_stl', 'ask_user', 'export_file'].every((t) => tools.includes(t)), `tools listed: ${tools.join(', ')}`);
+ok(['open_caliper', 'get_state', 'screenshot', 'edit_model', 'import_file', 'ask_user', 'export_file'].every((t) => tools.includes(t)), `tools listed: ${tools.join(', ')}`);
 ok(/Caliper is a browser CAD tool/.test(A.client.getInstructions() || ''), 'server instructions carry the guide');
 
 let r = await A.call('get_state');
@@ -119,7 +120,7 @@ r = await A.call('set_view', { view: 'top' });
 ok(json(r).camera?.view === 'top', 'set_view moves their camera');
 
 // Import a file from disk, then export to disk.
-r = await A.call('import_stl', { path: 'spacer.stl', at: [60, 0, 0] });
+r = await A.call('import_stl', { path: 'spacer.stl', at: [60, 0, 0] }); // the old name still works
 st = json(r);
 ok(!r.isError && st.ok && st.bodies.length === 2 && st.notes?.[0]?.note.includes('exact solid'), `import_stl from disk: ${textOf(r).slice(0, 140)}`);
 r = await A.call('export_file', { format: 'stl', path: 'out/clip.stl' });
@@ -176,6 +177,43 @@ await page.click('#chat-send');
 await page.waitForFunction(() => !document.querySelector('#assistant.running'), null, { timeout: 60000 }).catch(() => {});
 const lastBubble = await page.$$eval('.msg.from-claude', (els) => els.at(-1).innerText);
 ok(envRuns() === before + 2 && /25 mm tall/.test(lastBubble) && !/Failed to authenticate/.test(lastBubble), `when a clean start cannot sign in, the chat retries with the inherited environment: ${lastBubble.replace(/\n/g, ' | ')}`);
+// Attach an image, a text file and a zip (a 3D part plus a schematic) to one message.
+{
+  const zlib = await import('node:zlib');
+  const zipOf = (files) => {
+    const parts = []; const central = []; let off = 0;
+    for (const [name, data] of files) {
+      const body = zlib.deflateRawSync(data); const n = Buffer.from(name);
+      const h = Buffer.alloc(30); h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(8, 8); h.writeUInt32LE(body.length, 18); h.writeUInt32LE(data.length, 22); h.writeUInt16LE(n.length, 26);
+      parts.push(h, n, body);
+      const c = Buffer.alloc(46); c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(8, 10); c.writeUInt32LE(body.length, 20); c.writeUInt32LE(data.length, 24); c.writeUInt16LE(n.length, 28); c.writeUInt32LE(off, 42);
+      central.push(c, n); off += 30 + n.length + body.length;
+    }
+    const cd = Buffer.concat(central); const e = Buffer.alloc(22);
+    e.writeUInt32LE(0x06054b50, 0); e.writeUInt16LE(files.length, 8); e.writeUInt16LE(files.length, 10); e.writeUInt32LE(cd.length, 12); e.writeUInt32LE(off, 16);
+    return Buffer.concat([...parts, cd, e]);
+  };
+  // A real 8x8 red PNG.
+  const chunk = (type, data) => { const t = Buffer.from(type); const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(Buffer.concat([t, data]))); return Buffer.concat([len, t, data, crc]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(8, 0); ihdr.writeUInt32BE(8, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const rows = Buffer.concat(Array.from({ length: 8 }, () => Buffer.from([0, ...Array(8).fill([220, 30, 30]).flat()])));
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
+  const bodiesBefore = await page.evaluate(() => window.caliper.store.results.bodies.length);
+  await page.setInputFiles('#chat-file', [
+    { name: 'sketch.png', mimeType: 'image/png', buffer: png },
+    { name: 'sizes.txt', mimeType: 'text/plain', buffer: Buffer.from('Outer can: 66 diameter x 115 height') },
+    { name: 'project.zip', mimeType: 'application/zip', buffer: zipOf([['spacer.stl', fs.readFileSync(path.join(work, 'spacer.stl'))], ['board.sch', Buffer.from('<?xml version="1.0"?><eagle version="9.7.0"><drawing/></eagle>')], ['__MACOSX/._spacer.stl', Buffer.alloc(4)]]) },
+  ]);
+  await page.waitForFunction(() => document.querySelectorAll('.attach-chip').length === 4, null, { timeout: 30000 }).catch(() => {});
+  const chips = await page.$$eval('.attach-chip', (els) => els.map((e) => e.innerText.trim()));
+  ok(chips.length === 4 && (await page.evaluate(() => window.caliper.store.results.bodies.length)) === bodiesBefore + 1, `attachments: image, text, the zip's part imported and its schematic attached (${chips.join(' | ')})`);
+  await page.fill('#chat-input', 'what do you make of these?');
+  await page.click('#chat-send');
+  await page.waitForFunction(() => !document.querySelector('#assistant.running') && /image\(s\) and your files/.test(document.getElementById('chat-log').innerText), null, { timeout: 60000 }).catch(() => {});
+  const sent = JSON.parse(fs.readFileSync(promptLog, 'utf8').trim().split('\n').at(-1));
+  ok(sent.images === 1 && /66 diameter x 115 height/.test(sent.prompt) && /<eagle version/.test(sent.prompt) && /dropped project\.zip into the chat\. Now in the model: spacer\.stl \(Import feature import\d+\)/.test(sent.prompt) && /what do you make of these/.test(sent.prompt), `Claude Code receives the image, the files' text and where the part went (${sent.prompt.length} characters)`);
+  ok((await page.$$('.msg.from-user .msg-images img')).length >= 1 && (await page.$$('.attach-chip')).length === 0, 'the message shows the image and the tray empties');
+}
 await page.fill('#chat-input', 'this will fail');
 await page.click('#chat-send');
 await page.waitForFunction(() => !document.querySelector('#assistant.running') && document.querySelector('.msg-error'), null, { timeout: 30000 }).catch(() => {});

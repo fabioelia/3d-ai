@@ -119,15 +119,15 @@ export const TOOLS = [
     },
   },
   {
-    name: 'import_stl',
-    title: 'Import an STL file',
+    name: 'import_file',
+    title: 'Import a 3D file',
     description:
-      'Bring an STL file (or a .zip of them, as model sites deliver) from the local disk into the model as Import features. Small clean meshes (up to about 6,000 triangles) become exact solids whose flat faces can be sketched on, filleted and shelled; larger ones become mesh bodies that can be moved, joined, cut and patterned; files that are not closed solids even after repair come in as reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
+      'Bring a 3D file from the local disk into the model as Import features: STL, STEP/STP, OBJ or 3MF, or a .zip of them (as model sites deliver). STEP files with real surfaces come in as exact solids. Meshes (STL, OBJ, 3MF, and STEP files that only hold a mesh, as Fusion\'s tessellated export does) are repaired, then small clean ones become exact solids whose flat faces can be sketched on, filleted and shelled, larger ones mesh bodies (moved, joined, cut, patterned), and ones that still are not closed reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Path to the .stl or .zip file on this computer.' },
-        name: { type: 'string', description: 'Name for the part in the timeline (single STL only).' },
+        path: { type: 'string', description: 'Path to the .stl, .step, .stp, .obj, .3mf or .zip file on this computer.' },
+        name: { type: 'string', description: 'Name for the part in the timeline (single file only).' },
         mode: { type: 'string', enum: ['auto', 'solid', 'mesh'], default: 'auto' },
         units: { type: 'string', enum: ['mm', 'cm', 'm', 'in'], default: 'mm' },
         scale: { type: 'number', default: 1 },

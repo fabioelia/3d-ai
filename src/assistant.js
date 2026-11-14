@@ -1,7 +1,7 @@
 // The side-panel chat. It has no model of its own: every message goes over MCP, through the Caliper
 // bridge, to Claude Code on the person's computer, which works on the model with the same Caliper tools
 // any agent gets and replies here. It runs on the person's own Claude login; there is no API key.
-import { store, on } from './store.js';
+import { store, on, featureById } from './store.js';
 import * as act from './actions.js';
 import { h } from './ui.js';
 import { agentLink } from './agent/panel.js';
@@ -20,7 +20,7 @@ const STEP_LABEL = {
   check_printability: 'Checking printability',
   set_model: 'Building the model',
   edit_model: 'Editing the model',
-  import_stl: 'Importing',
+  import_file: 'Importing',
   select: 'Selecting',
   set_view: 'Moving the camera',
   ui_action: 'Using the interface',
@@ -33,18 +33,136 @@ const $ = (id) => document.getElementById(id);
 const state = {
   session: null, // Claude Code session id, resumed so follow-ups keep the conversation
   running: null, // AbortController
+  attachments: [], // for the next message: { kind: 'image', name, mediaType, data, url } | { kind: 'part', name, ids }
 };
+const MAX_IMAGES = 6;
+const MAX_TEXT = 200 * 1024; // per file
+const MAX_TEXT_TOTAL = 500 * 1024;
+const MODEL_FILE = /\.(stl|step|stp|obj|3mf|zip)$/i;
+const IMAGE_TYPES = /^image\/(png|jpeg|webp|gif)$/;
+
+// ---------- attachments ----------
+// Images go to Claude with the message (scaled to at most 1568 px, which is what Claude looks at
+// anyway). STL and zip files are imported into the model, and the message says which parts they became.
+async function prepImage(file) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 1568 / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * k));
+  const hgt = Math.max(1, Math.round(bmp.height * k));
+  const keep = k === 1 && file.size < 1.5e6 && IMAGE_TYPES.test(file.type);
+  let blob = file;
+  if (!keep) {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = hgt;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, hgt);
+    ctx.drawImage(bmp, 0, 0, w, hgt);
+    blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.88));
+  }
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return { kind: 'image', name: file.name || 'image', mediaType: keep ? file.type : 'image/jpeg', data: btoa(bin), url: URL.createObjectURL(blob) };
+}
+
+// Anything else that is text (notes, CSV, JSON, schematics such as Eagle .sch, KiCad, G-code) is
+// attached for Claude to read; other binary files are named but cannot be read.
+function attachText(name, bytes) {
+  let content;
+  try {
+    content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return `${name} (not a text file)`;
+  }
+  if (content.includes('\u0000')) return `${name} (not a text file)`;
+  const used = state.attachments.filter((a) => a.kind === 'text').reduce((n, a) => n + a.text.length, 0);
+  if (used >= MAX_TEXT_TOTAL) return `${name} (too much text in one message)`;
+  const limit = Math.min(MAX_TEXT, MAX_TEXT_TOTAL - used);
+  const cut = content.length > limit;
+  state.attachments.push({ kind: 'text', name, text: cut ? content.slice(0, limit) : content, cut });
+  return null;
+}
+
+export async function attachFiles(files) {
+  if (window.claude?.use) return false;
+  const list = [...files];
+  const images = list.filter((f) => f.type?.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(f.name));
+  const models = list.filter((f) => !images.includes(f) && MODEL_FILE.test(f.name));
+  const other = list.filter((f) => !images.includes(f) && !models.includes(f));
+  const unread = [];
+  for (const f of other) {
+    const why = attachText(f.name, new Uint8Array(await f.arrayBuffer()));
+    if (why) unread.push(why);
+  }
+  for (const f of images) {
+    if (state.attachments.filter((a) => a.kind === 'image').length >= MAX_IMAGES) {
+      act.app.toast(`Up to ${MAX_IMAGES} images per message.`, 'error');
+      break;
+    }
+    try {
+      state.attachments.push(await prepImage(f));
+    } catch {
+      act.app.toast(`${f.name} could not be read as an image.`, 'error');
+    }
+  }
+  if (models.length) {
+    const extra = [];
+    const ids = await act.importFiles(models, { others: extra });
+    if (ids.length) state.attachments.push({ kind: 'part', name: models.map((f) => f.name).join(', '), ids, files: ids.map((id) => `${featureById(id)?.fileName || 'a file'} (Import feature ${id})`) });
+    for (const e of extra) {
+      const why = attachText(e.name, e.bytes);
+      if (why) unread.push(why);
+    }
+  }
+  if (unread.length) act.app.toast(`Could not attach ${unread.join(', ')}. The chat reads images and text files; Caliper imports STL, STEP, OBJ and 3MF.`, 'error');
+  renderAttachments();
+  if (state.attachments.length) $('chat-input').focus();
+  return true;
+}
+
+function renderAttachments() {
+  const tray = $('chat-attach');
+  tray.hidden = !state.attachments.length;
+  tray.replaceChildren(
+    ...state.attachments.map((a, i) =>
+      h(
+        'span',
+        { class: 'attach-chip', title: a.kind === 'part' ? `Imported into the model as ${a.ids.join(', ')}` : a.name },
+        a.kind === 'image'
+          ? h('img', { src: a.url, alt: '' })
+          : a.kind === 'text'
+            ? h('span', { class: 'attach-ico', html: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>' })
+            : h('span', { class: 'attach-ico', html: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.500v9L12 21l-8-4.500v-9z"/><path d="M4 7.500l8 4.500 8-4.500M12 12v9"/></svg>' }),
+        h('span', { class: 'attach-name' }, a.kind === 'part' ? `${a.name} (in the model)` : a.kind === 'text' ? `${a.name}${a.cut ? ' (first part)' : ''}` : a.name),
+        h('button', {
+          class: 'icon-btn',
+          type: 'button',
+          title: a.kind === 'part' ? 'Do not mention it in the message (it stays in the model)' : 'Remove',
+          'aria-label': `Remove ${a.name}`,
+          html: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+          onclick: () => {
+            const [gone] = state.attachments.splice(i, 1);
+            if (gone?.url) URL.revokeObjectURL(gone.url);
+            renderAttachments();
+          },
+        }),
+      ),
+    ),
+  );
+}
 
 const connected = () => {
   const l = agentLink();
   return !!(l && l.state === 'connected' && l.chat?.available);
 };
 
-function ask(text, turn, signal, onText) {
+function ask(text, images, turn, signal, onText) {
   return new Promise((resolve, reject) => {
     let said = '';
     let gap = false;
-    const cancel = agentLink().chatRequest({ text, sessionId: state.session }, (ev) => {
+    const cancel = agentLink().chatRequest({ text, sessionId: state.session, images }, (ev) => {
       if (ev.kind === 'start') {
         if (ev.sessionId) state.session = ev.sessionId;
         if (ev.caliper && ev.caliper !== 'connected') turn.onStep('Claude Code could not reach Caliper');
@@ -96,7 +214,7 @@ function openAgentMenu() {
 
 async function send(text) {
   text = text.trim();
-  if (!text || state.running) return;
+  if ((!text && !state.attachments.length) || state.running) return;
   if (!connected()) {
     renderStatus();
     openAgentMenu();
@@ -109,7 +227,21 @@ async function send(text) {
   $('chat-suggest').hidden = true;
   $('chat-empty').hidden = true;
   $('chat-input').value = '';
-  bubble('user', text);
+  const attached = state.attachments.splice(0);
+  renderAttachments();
+  const images = attached.filter((a) => a.kind === 'image');
+  const parts = attached.filter((a) => a.kind === 'part');
+  const texts = attached.filter((a) => a.kind === 'text');
+  const shown = bubble('user', text || (images.length ? '' : 'Here are the files.'));
+  if (images.length) shown.el.prepend(h('div', { class: 'msg-images' }, images.map((a) => h('img', { src: a.url, alt: a.name }))));
+  if (parts.length || texts.length) shown.el.append(h('div', { class: 'msg-steps' }, [...parts.map((p) => h('span', { class: 'step' }, `Imported ${p.name}`)), ...texts.map((t) => h('span', { class: 'step' }, t.name))]));
+  // Tell Claude what came with the message; the parts themselves it can see in the model.
+  const notes = [];
+  if (images.length) notes.push(`The person attached ${images.length === 1 ? 'an image' : `${images.length} images`} (${images.map((a) => a.name).join(', ')}).`);
+  for (const p of parts) notes.push(`The person dropped ${p.name} into the chat. Now in the model: ${p.files.join(', ')}.`);
+  if (texts.length) notes.push(`The person attached ${texts.length === 1 ? 'a file' : `${texts.length} files`} for reference; ${texts.length === 1 ? 'it is' : 'they are'} at the end of this message.`);
+  const files = texts.map((t) => `--- ${t.name}${t.cut ? ' (only the first part; the file is longer)' : ''} ---\n${t.text}\n--- end of ${t.name} ---`);
+  const message = [...notes, text || (images.length ? 'Here is what I mean.' : 'What can you do with this?'), ...files].join('\n\n');
   const out = bubble('assistant', 'Thinking…');
   out.el.classList.add('pending');
   const ctl = new AbortController();
@@ -133,7 +265,7 @@ async function send(text) {
     $('chat-log').scrollTop = $('chat-log').scrollHeight;
   };
   try {
-    const answer = await ask(text, turn, ctl.signal, onText);
+    const answer = await ask(message, images.map((a) => ({ mediaType: a.mediaType, data: a.data })), turn, ctl.signal, onText);
     out.el.classList.remove('pending');
     out.body.textContent = answer || got || 'Done.';
   } catch (e) {
@@ -216,6 +348,48 @@ export function initAssistant() {
     $('chat-empty').hidden = false;
   });
   $('chat-connect').addEventListener('click', openAgentMenu);
+
+  // Attach by button, by dropping onto the chat panel, or by pasting into the message box.
+  $('chat-file-btn').addEventListener('click', () => $('chat-file').click());
+  $('chat-file').addEventListener('change', (e) => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    if (files.length) attachFiles(files);
+  });
+  const panel = $('assistant');
+  let depth = 0;
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  panel.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    depth++;
+    panel.classList.add('drop-target');
+  });
+  panel.addEventListener('dragleave', () => {
+    if (--depth <= 0) {
+      depth = 0;
+      panel.classList.remove('drop-target');
+    }
+  });
+  panel.addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  panel.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation(); // the window's own drop handler would import instead of attaching
+    depth = 0;
+    panel.classList.remove('drop-target');
+    document.body.classList.remove('dropping');
+    attachFiles(e.dataTransfer.files);
+  });
+  $('chat-input').addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (!files.length) return;
+    e.preventDefault();
+    attachFiles(files);
+  });
   on('agent-link', renderStatus);
   renderStatus();
 }

@@ -47,8 +47,11 @@ export async function readZip(bytes, inflateRaw, { accept = () => true, maxBytes
   return out;
 }
 
-// For readZip's accept: STL files, skipping macOS metadata and hidden files.
-export const stlEntry = (name) => /\.stl$/i.test(name) && !/(^|\/)(__MACOSX|\.)/.test(name);
+// 3D formats Caliper imports. A .3mf is itself a zip, so it is only an archive when named .zip.
+export const MODEL_EXT = /\.(stl|step|stp|obj|3mf)$/i;
+// For readZip's accept: every real file, skipping macOS metadata and hidden files.
+export const realEntry = (name) => !/(^|\/)(__MACOSX|\.)/.test(name);
+export const stlEntry = (name) => MODEL_EXT.test(name) && realEntry(name);
 
 // Browser inflate.
 export async function inflateRawWeb(data) {

@@ -161,14 +161,14 @@ export class BridgeLink {
 
   // Ask Claude Code on this computer (through the bridge). onEvent gets start/text/tool/break/done/
   // error/cancelled events; returns a function that cancels the run.
-  chatRequest({ text, sessionId, model }, onEvent) {
+  chatRequest({ text, sessionId, model, images }, onEvent) {
     if (this.state !== 'connected' || !this.chat?.available) {
       onEvent({ kind: 'error', message: 'Claude Code is not connected. Open the Agent menu to connect it.' });
       return () => {};
     }
     const id = `c${++this.chatSeq}`;
     this.chats.set(id, onEvent);
-    this.send({ type: 'chat', id, text, sessionId, model });
+    this.send({ type: 'chat', id, text, sessionId, model, images });
     return () => this.send({ type: 'chat-cancel', id });
   }
 

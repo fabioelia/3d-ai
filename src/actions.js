@@ -172,12 +172,14 @@ export function viewportClick(pick, evt) {
 }
 
 // ---------- importing ----------
-// Brings STL files (or zips of them) in as Import features; returns the new feature ids. `items` are
-// File objects or { name, bytes }. Several parts keep the layout they share in their files (centred
-// on the bed as a group) unless they would overlap, in which case they are set out in a row.
-export async function importFiles(items, { by = 'user', props = {} } = {}) {
+// Brings 3D files (STL, STEP, OBJ, 3MF, or zips of them) in as Import features; returns the new
+// feature ids. `items` are File objects or { name, bytes }. Several parts keep the layout they share in
+// their files (centred on the bed as a group) unless they would overlap, in which case they are set out
+// in a row. Other files found in zips go to `others` (the chat attaches them for Claude to read).
+export async function importFiles(items, { by = 'user', props = {}, others = null } = {}) {
   const { putFile } = await import('./files.js');
-  const { isZip, readZip, stlEntry, inflateRawWeb } = await import('./zip.js');
+  const { readZip, realEntry, MODEL_EXT, inflateRawWeb } = await import('./zip.js');
+  const skipped = [];
   const parts = [];
   for (const item of items) {
     const name = item.name || 'model.stl';
@@ -190,17 +192,23 @@ export async function importFiles(items, { by = 'user', props = {} } = {}) {
       continue;
     }
     const bytes = isBlob ? new Uint8Array(await item.arrayBuffer()) : item.bytes;
-    if (/\.zip$/i.test(name) || isZip(bytes)) {
+    if (/\.zip$/i.test(name)) {
       try {
-        const found = await readZip(bytes, inflateRawWeb, { accept: stlEntry });
-        if (!found.length) app.toast(`${name} has no STL files inside.`, 'error');
-        parts.push(...found);
+        const found = await readZip(bytes, inflateRawWeb, { accept: realEntry });
+        for (const e of found) {
+          if (MODEL_EXT.test(e.name)) parts.push(e);
+          else if (others) others.push(e);
+          else skipped.push(e.name);
+        }
+        if (!found.some((e) => MODEL_EXT.test(e.name))) app.toast(`${name} has no 3D files inside (STL, STEP, OBJ or 3MF).`, 'error');
       } catch (e) {
         app.toast(`${name}: ${e.message}`, 'error');
       }
-    } else if (/\.stl$/i.test(name)) parts.push({ name, bytes });
-    else app.toast(`${name} is not an STL or zip file. Caliper imports .stl files, or .zip files that contain them.`, 'error');
+    } else if (MODEL_EXT.test(name)) parts.push({ name, bytes });
+    else if (others) others.push({ name, bytes });
+    else app.toast(`${name} is not a 3D file Caliper can import (STL, STEP, OBJ, 3MF, or a zip of them).`, 'error');
   }
+  if (skipped.length) app.toast(`Skipped ${skipped.join(', ')}: not 3D files. Drop the zip into the chat to share them with Claude.`);
   if (!parts.length) return [];
   if (store.mode.kind !== 'model') leaveMode();
   const many = parts.length > 1;
@@ -212,7 +220,7 @@ export async function importFiles(items, { by = 'user', props = {} } = {}) {
     (doc) => {
       parts.forEach((part, i) => {
         const id = newFeatureId('import');
-        doc.features.push({ id, type: 'import', name: part.name.replace(/\.stl$/i, ''), fileName: part.name, file: ids[i], op: 'new', ...(many ? { align: 'original' } : {}), ...props });
+        doc.features.push({ id, type: 'import', name: part.name.replace(MODEL_EXT, ''), fileName: part.name, file: ids[i], op: 'new', ...(many ? { align: 'original' } : {}), ...props });
         added.push(id);
       });
     },
