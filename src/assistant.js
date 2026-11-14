@@ -66,7 +66,8 @@ function ask(text, turn, signal, onText) {
 }
 
 function friendly(msg = '') {
-  if (/not logged in|\/login|authenticat|invalid api key|oauth/i.test(msg)) return 'Claude Code is not signed in on this computer. Run "claude" in a terminal once and sign in, then send again.';
+  if (/expired|could not be refreshed/i.test(msg)) return 'Claude Code\'s sign-in on this computer has expired. In a terminal, run "claude", type /login and sign in again, then send your message again.';
+  if (/not logged in|\/login|authenticat|invalid api key|oauth/i.test(msg)) return 'Claude Code is not signed in on this computer. In a terminal, run "claude" and sign in (/login), then send again.';
   if (/rate limit|usage limit|limit reached/i.test(msg)) return `Claude Code hit a usage limit: ${msg}`;
   return `Claude Code: ${msg}`;
 }

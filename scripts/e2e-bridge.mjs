@@ -17,7 +17,9 @@ const shots = process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'caliper-
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'caliper-bridge-'));
 const PORT = 7541;
 const chatLog = path.join(work, 'claude-args.log');
-const env = { ...process.env, XDG_CONFIG_HOME: path.join(work, 'config'), CALIPER_NO_OPEN: '1', CALIPER_PORT: String(PORT), CALIPER_CLAUDE_BIN: path.join(ROOT, 'scripts/fake-claude.mjs'), FAKE_CLAUDE_LOG: chatLog };
+const envLog = path.join(work, 'claude-env.log');
+// As when Claude Code starts the bridge: its own session variables are in the environment.
+const env = { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_OAUTH_TOKEN: 'parent-session-token', CLAUDE_CONFIG_DIR: path.join(work, 'claude-config'), XDG_CONFIG_HOME: path.join(work, 'config'), CALIPER_NO_OPEN: '1', CALIPER_PORT: String(PORT), CALIPER_CLAUDE_BIN: path.join(ROOT, 'scripts/fake-claude.mjs'), FAKE_CLAUDE_LOG: chatLog, FAKE_CLAUDE_ENV_LOG: envLog };
 
 let failed = 0;
 const ok = (c, m) => {
@@ -155,6 +157,8 @@ ok(chatState.name === 'Chat box' && /I made a 40 mm box/.test(chatState.log) && 
 const runs = fs.readFileSync(chatLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((a) => a[0] === '-p');
 const a0 = runs[0];
 ok(a0[a0.indexOf('--tools') + 1] === '' && a0[a0.indexOf('--allowedTools') + 1] === 'mcp__caliper' && a0.includes('--strict-mcp-config') && a0[a0.indexOf('--permission-mode') + 1] === 'dontAsk', 'Claude Code runs with Caliper tools only');
+const env0 = JSON.parse(fs.readFileSync(envLog, 'utf8').trim().split('\n')[0]);
+ok(env0.CLAUDECODE === null && env0.CLAUDE_CODE_OAUTH_TOKEN === null && env0.CLAUDE_CONFIG_DIR, `the chat's Claude Code does not inherit the parent session's variables, but keeps the config dir: ${JSON.stringify(env0)}`);
 await page.fill('#chat-input', 'make it taller');
 await page.click('#chat-send');
 await page.waitForFunction(() => !document.querySelector('#assistant.running') && /25 mm tall/.test(document.getElementById('chat-log').innerText), null, { timeout: 60000 }).catch(() => {});
@@ -165,6 +169,13 @@ ok(runs2.length === 2 && sid && h === 25, `follow-up resumes the same Claude Cod
 await page.click('text=Undo this change');
 await page.waitForTimeout(800);
 ok((await page.evaluate(() => window.caliper.store.doc.features[0]?.h)) === 10, 'the chat turn can be undone');
+const envRuns = () => fs.readFileSync(envLog, 'utf8').trim().split('\n').length;
+const before = envRuns();
+await page.fill('#chat-input', 'parent-auth: make it taller');
+await page.click('#chat-send');
+await page.waitForFunction(() => !document.querySelector('#assistant.running'), null, { timeout: 60000 }).catch(() => {});
+const lastBubble = await page.$$eval('.msg.from-claude', (els) => els.at(-1).innerText);
+ok(envRuns() === before + 2 && /25 mm tall/.test(lastBubble) && !/Failed to authenticate/.test(lastBubble), `when a clean start cannot sign in, the chat retries with the inherited environment: ${lastBubble.replace(/\n/g, ' | ')}`);
 await page.fill('#chat-input', 'this will fail');
 await page.click('#chat-send');
 await page.waitForFunction(() => !document.querySelector('#assistant.running') && document.querySelector('.msg-error'), null, { timeout: 30000 }).catch(() => {});

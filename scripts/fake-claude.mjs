@@ -16,6 +16,8 @@ const opt = (name) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(args) + '\n');
+// Which of the parent session's variables reached this process.
+if (process.env.FAKE_CLAUDE_ENV_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_ENV_LOG, JSON.stringify({ CLAUDECODE: process.env.CLAUDECODE ?? null, CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null }) + '\n');
 const prompt = opt('-p') || '';
 const session = opt('--resume') || crypto.randomUUID();
 const out = (o) => process.stdout.write(JSON.stringify({ ...o, session_id: session }) + '\n');
@@ -32,6 +34,13 @@ const say = (text) => {
   for (const piece of text.match(/.{1,12}/g)) out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: piece } } });
   out({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
 };
+// "parent-auth": sign-in only works with the inherited session variables (setups like that exist).
+if (/parent-auth/.test(prompt) && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+  out({ type: 'system', subtype: 'init', model: 'fake', tools: [], mcp_servers: [{ name: 'caliper', status: 'connected' }] });
+  out({ type: 'assistant', error: 'authentication_failed', message: { content: [{ type: 'text', text: 'Failed to authenticate: OAuth session expired and could not be refreshed' }] } });
+  out({ type: 'result', subtype: 'success', is_error: true, result: 'Failed to authenticate: OAuth session expired and could not be refreshed' });
+  process.exit(1);
+}
 if (/fail/.test(prompt)) {
   out({ type: 'result', subtype: 'success', is_error: true, result: 'Not logged in · Please run /login' });
   process.exit(1);

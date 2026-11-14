@@ -118,7 +118,41 @@ function detectClaude() {
   });
 }
 
+// The chat's Claude Code must use the person's own stored login, which it can refresh. When the bridge
+// was started by a Claude Code session, the environment carries that session's own variables (and
+// possibly its short-lived credentials); a child that inherits them can fail with "OAuth session
+// expired and could not be refreshed". So the child starts without them. Provider and config
+// settings the person chose (Bedrock, Vertex, a custom config dir, ANTHROPIC_*) are kept.
+const KEEP = /^(CLAUDE_CONFIG_DIR|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY)|CLAUDE_CODE_SKIP_\w+_AUTH)$/;
+function cleanEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^CLAUDE/.test(k) || KEEP.test(k)) env[k] = v;
+  return env;
+}
+const isAuthError = (t) => /oauth|not logged in|\/login|authenticat|credential|invalid api key|401/i.test(String(t || ''));
+
 function runChat(hub, msg, send) {
+  let stop = null;
+  let cancelled = false;
+  const attempt = (inherit) => {
+    stop = runClaude(hub, msg, inherit, (ev) => {
+      // A clean start that cannot sign in before doing anything: try once more with the inherited
+      // environment (some setups only provide credentials that way).
+      if (!inherit && ev.kind === 'error' && ev.early && isAuthError(ev.message) && !cancelled) {
+        log('chat: sign-in failed with a clean environment; retrying with the inherited one');
+        return attempt(true);
+      }
+      send(ev);
+    });
+  };
+  attempt(false);
+  return () => {
+    cancelled = true;
+    stop?.();
+  };
+}
+
+function runClaude(hub, msg, inherit, send) {
   const dir = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'caliper', 'chat');
   fs.mkdirSync(dir, { recursive: true });
   const mcp = { mcpServers: { caliper: { type: 'http', url: `http://127.0.0.1:${hub.port}/mcp` } } };
@@ -145,7 +179,7 @@ function runChat(hub, msg, send) {
   if (msg.model && /^[\w.-]{2,60}$/.test(msg.model)) args.push('--model', msg.model);
   let child;
   try {
-    child = spawn(CLAUDE_BIN, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CALIPER_CHAT: '1' } });
+    child = spawn(CLAUDE_BIN, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...(inherit ? process.env : cleanEnv()), CALIPER_CHAT: '1' } });
   } catch (e) {
     send({ kind: 'error', message: `Could not start Claude Code: ${e.message}` });
     return () => {};
@@ -153,11 +187,12 @@ function runChat(hub, msg, send) {
   let buf = '';
   let stderr = '';
   let finished = false;
+  let worked = false; // it said or did something, so a retry would repeat that
   let streamed = false; // text already sent as deltas for the current message
   const finish = (ev) => {
     if (finished) return;
     finished = true;
-    send(ev);
+    send({ ...ev, early: !worked });
   };
   child.stdout.on('data', (chunk) => {
     buf += chunk;
@@ -172,16 +207,24 @@ function runChat(hub, msg, send) {
       } catch {
         continue;
       }
+      if (finished) continue;
       if (ev.type === 'system' && ev.subtype === 'init') {
         const c = (ev.mcp_servers || []).find((m) => m.name === 'caliper');
         send({ kind: 'start', sessionId: ev.session_id, model: ev.model, caliper: c ? c.status : 'missing' });
       } else if (ev.type === 'stream_event' && ev.event?.type === 'content_block_delta' && ev.event.delta?.type === 'text_delta') {
+        worked = true;
         streamed = true;
         send({ kind: 'text', delta: ev.event.delta.text });
       } else if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
         for (const b of ev.message.content) {
-          if (b.type === 'text' && b.text && !streamed) send({ kind: 'text', delta: b.text });
-          if (b.type === 'tool_use') send({ kind: 'tool', name: String(b.name || '').replace(/^mcp__caliper__/, '') });
+          if (b.type === 'text' && b.text && !streamed && !(ev.error || isAuthError(b.text) && !worked)) {
+            worked = true;
+            send({ kind: 'text', delta: b.text });
+          }
+          if (b.type === 'tool_use') {
+            worked = true;
+            send({ kind: 'tool', name: String(b.name || '').replace(/^mcp__caliper__/, '') });
+          }
         }
         streamed = false;
         send({ kind: 'break' });
