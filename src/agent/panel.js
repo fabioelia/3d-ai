@@ -1,6 +1,6 @@
 // The person's side of agent integration: the Agent menu (status, setup, connection code), agent
 // activity in the side panel, and the prompt bar agents use to ask the person something.
-import { store, on, logActivity } from '../store.js';
+import { store, on, emit, logActivity } from '../store.js';
 import * as act from '../actions.js';
 import { h, ICON } from '../ui.js';
 import { BridgeLink, parseCode } from './link.js';
@@ -22,6 +22,7 @@ function line(by, textContent, kind = '') {
 }
 
 function renderStatus() {
+  emit('agent-link');
   const btn = $('agent-btn');
   const st = link.state;
   const agents = link.agents || [];

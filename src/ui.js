@@ -450,7 +450,9 @@ function inspectorSignature() {
   const shape = sk && sel.shape ? sk.shapes.find((s) => s.id === sel.shape) : null;
   const shapeOf = (o) => (o ? Object.keys(o).sort().join(',') + JSON.stringify([o.type, o.kind, o.extent, o.face !== undefined, o.plane, o.hole, o.suppressed, o.sketch, o.features, o.op, o.side, o.axis, o.dir, o.dir2, o.copy]) : '');
   const sels = f ? JSON.stringify([f.edges && (f.edges.pick ? f.edges.pick.length : f.edges), f.faces && (f.faces.pick ? f.faces.pick.length : f.faces), f.face && f.face.pick && f.face.pick.length]) : '';
-  return [store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
+  // With nothing selected the inspector shows each body's size and volume, so those count too.
+  const sizes = f ? '' : (store.results?.bodies || []).map((b) => `${b.name}:${b.min.concat(b.max).map((v) => v.toFixed(2)).join(',')}:${Math.round(b.volume)}`).join(';');
+  return [sizes, store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
 }
 
 function renderInspector(force = false) {

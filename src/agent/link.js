@@ -44,6 +44,9 @@ export class BridgeLink {
     this.wanted = false;
     this.retry = 0;
     this.calls = new Map(); // id -> AbortController
+    this.chat = null; // what the bridge offers for the side-panel chat: { available, version, reason }
+    this.chats = new Map(); // chat id -> event handler
+    this.chatSeq = 0;
     window.addEventListener('focus', () => this.send({ type: 'focus' }));
   }
 
@@ -122,6 +125,9 @@ export class BridgeLink {
     ws.onclose = (ev) => {
       this.ws = null;
       this.agents = [];
+      this.chat = null;
+      for (const h of this.chats.values()) h({ kind: 'error', message: 'Lost the connection to the Caliper bridge.' });
+      this.chats.clear();
       for (const c of this.calls.values()) c.abort();
       this.calls.clear();
       if (ev.code === 4401) {
@@ -139,6 +145,19 @@ export class BridgeLink {
     };
   }
 
+  // Ask Claude Code on this computer (through the bridge). onEvent gets start/text/tool/break/done/
+  // error/cancelled events; returns a function that cancels the run.
+  chatRequest({ text, sessionId, model }, onEvent) {
+    if (this.state !== 'connected' || !this.chat?.available) {
+      onEvent({ kind: 'error', message: 'Claude Code is not connected. Open the Agent menu to connect it.' });
+      return () => {};
+    }
+    const id = `c${++this.chatSeq}`;
+    this.chats.set(id, onEvent);
+    this.send({ type: 'chat', id, text, sessionId, model });
+    return () => this.send({ type: 'chat-cancel', id });
+  }
+
   send(msg) {
     if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(msg));
   }
@@ -150,7 +169,13 @@ export class BridgeLink {
     } catch {
       return;
     }
-    if (msg.type === 'agents') {
+    if (msg.type === 'bridge') {
+      this.chat = msg.chat || null;
+      this.onStatus?.(this);
+    } else if (msg.type === 'chat-event') {
+      this.chats.get(msg.id)?.(msg.event);
+      if (['done', 'error', 'cancelled'].includes(msg.event?.kind)) this.chats.delete(msg.id);
+    } else if (msg.type === 'agents') {
       this.agents = msg.agents || [];
       this.onStatus?.(this);
     } else if (msg.type === 'cancel') {

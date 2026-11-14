@@ -956,19 +956,6 @@ input.in:not([type='password']):not(.insp-name):not(.p-name) {
 .as-head .sec-title {
   margin: 0;
 }
-.as-settings {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--raised);
-  font-size: 12px;
-}
-.as-settings .btn {
-  align-self: flex-start;
-}
 .chat-log {
   flex: 1 1 0;
   min-height: 0;

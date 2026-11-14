@@ -82,6 +82,126 @@ function openBrowser(url) {
   }
 }
 
+// ---------- chat: the page's side panel talks to Claude Code on this computer ----------
+// The person types in Caliper; the bridge runs Claude Code headless (`claude -p`) with only the Caliper
+// tools, pointed back at this bridge over MCP, and streams its reply into the panel. It runs on the
+// person's own Claude login, so no API key is needed.
+const CLAUDE_BIN = process.env.CALIPER_CLAUDE_BIN || 'claude';
+const CHAT_PROMPT = `You are working inside Caliper, a browser CAD tool for 3D-printable parts, and the person is chatting with you from Caliper's side panel while looking at the model. Use the caliper tools to see and change what they have open (get_state and screenshot first). Reply in one to three short plain sentences: no markdown, no code, no JSON. Say what you changed and which parameters are worth tweaking.`;
+
+let chatInfo = null; // { available, version, reason }
+function detectClaude() {
+  return new Promise((resolve) => {
+    let out = '';
+    let child;
+    try {
+      child = spawn(CLAUDE_BIN, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return resolve({ available: false, reason: 'Claude Code is not installed on this computer.' });
+    }
+    const t = setTimeout(() => {
+      child.kill();
+      resolve({ available: false, reason: 'Claude Code did not respond.' });
+    }, 8000);
+    child.stdout.on('data', (d) => (out += d));
+    child.on('error', () => {
+      clearTimeout(t);
+      resolve({ available: false, reason: 'Claude Code is not installed on this computer (the claude command was not found).' });
+    });
+    child.on('close', (code) => {
+      clearTimeout(t);
+      resolve(code === 0 ? { available: true, version: out.trim().split('\n')[0] } : { available: false, reason: 'Claude Code is installed but did not start.' });
+    });
+  });
+}
+
+function runChat(hub, msg, send) {
+  const dir = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'caliper', 'chat');
+  fs.mkdirSync(dir, { recursive: true });
+  const mcp = { mcpServers: { caliper: { type: 'http', url: `http://127.0.0.1:${hub.port}/mcp` } } };
+  const args = [
+    '-p',
+    String(msg.text || ''),
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--strict-mcp-config',
+    '--mcp-config',
+    JSON.stringify(mcp),
+    '--tools',
+    '', // no shell, file or web tools: only Caliper's
+    '--allowedTools',
+    'mcp__caliper',
+    '--permission-mode',
+    'dontAsk',
+    '--append-system-prompt',
+    CHAT_PROMPT,
+  ];
+  if (msg.sessionId && /^[\w-]{8,}$/.test(msg.sessionId)) args.push('--resume', msg.sessionId);
+  if (msg.model && /^[\w.-]{2,60}$/.test(msg.model)) args.push('--model', msg.model);
+  let child;
+  try {
+    child = spawn(CLAUDE_BIN, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CALIPER_CHAT: '1' } });
+  } catch (e) {
+    send({ kind: 'error', message: `Could not start Claude Code: ${e.message}` });
+    return () => {};
+  }
+  let buf = '';
+  let stderr = '';
+  let finished = false;
+  let streamed = false; // text already sent as deltas for the current message
+  const finish = (ev) => {
+    if (finished) return;
+    finished = true;
+    send(ev);
+  };
+  child.stdout.on('data', (chunk) => {
+    buf += chunk;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let ev;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (ev.type === 'system' && ev.subtype === 'init') {
+        const c = (ev.mcp_servers || []).find((m) => m.name === 'caliper');
+        send({ kind: 'start', sessionId: ev.session_id, model: ev.model, caliper: c ? c.status : 'missing' });
+      } else if (ev.type === 'stream_event' && ev.event?.type === 'content_block_delta' && ev.event.delta?.type === 'text_delta') {
+        streamed = true;
+        send({ kind: 'text', delta: ev.event.delta.text });
+      } else if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
+        for (const b of ev.message.content) {
+          if (b.type === 'text' && b.text && !streamed) send({ kind: 'text', delta: b.text });
+          if (b.type === 'tool_use') send({ kind: 'tool', name: String(b.name || '').replace(/^mcp__caliper__/, '') });
+        }
+        streamed = false;
+        send({ kind: 'break' });
+      } else if (ev.type === 'result') {
+        finish(ev.is_error ? { kind: 'error', message: String(ev.result || ev.subtype || 'Claude Code stopped with an error.'), sessionId: ev.session_id } : { kind: 'done', sessionId: ev.session_id, cost: ev.total_cost_usd, turns: ev.num_turns });
+      }
+    }
+  });
+  child.stderr.on('data', (d) => (stderr = (stderr + d).slice(-2000)));
+  child.on('error', (e) => finish({ kind: 'error', message: `Could not start Claude Code: ${e.message}` }));
+  child.on('close', (code) => {
+    if (code === 0 || code === null) finish({ kind: 'error', message: 'Claude Code stopped without an answer.' });
+    else finish({ kind: 'error', message: (stderr.trim().split('\n').pop() || `Claude Code exited with code ${code}.`).slice(0, 400) });
+  });
+  return () => {
+    if (!finished) {
+      finished = true;
+      child.kill('SIGTERM');
+      send({ kind: 'cancelled' });
+    }
+  };
+}
+
 // ---------- the hub: owns the port and the connected Caliper pages ----------
 class Hub {
   constructor(port) {
@@ -144,9 +264,12 @@ class Hub {
   }
 
   addApp(ws) {
-    const app = { ws, focusedAt: Date.now(), url: '' };
+    const app = { ws, focusedAt: Date.now(), url: '', chats: new Map() };
     this.apps.push(app);
     log(`Caliper page connected (${this.apps.length} open)`);
+    const sendBridgeInfo = () => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'bridge', version: VERSION, chat: chatInfo || { available: false, reason: 'Checking for Claude Code…' } }));
+    sendBridgeInfo();
+    if (!chatInfo) chatReady.then(sendBridgeInfo);
     ws.on('message', (raw) => {
       let msg;
       try {
@@ -156,6 +279,19 @@ class Hub {
       }
       if (msg.type === 'hello') app.url = msg.url || '';
       if (msg.type === 'hello' || msg.type === 'focus') app.focusedAt = Date.now();
+      if (msg.type === 'chat') {
+        if (!chatInfo?.available) {
+          ws.send(JSON.stringify({ type: 'chat-event', id: msg.id, event: { kind: 'error', message: chatInfo?.reason || 'Claude Code is not available.' } }));
+          return;
+        }
+        log('chat: running Claude Code');
+        const stop = runChat(this, msg, (event) => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'chat-event', id: msg.id, event }));
+          if (['done', 'error', 'cancelled'].includes(event.kind)) app.chats.delete(msg.id);
+        });
+        app.chats.set(msg.id, stop);
+      }
+      if (msg.type === 'chat-cancel') app.chats.get(msg.id)?.();
       if (msg.type === 'result') {
         const p = this.pending.get(msg.id);
         if (p) {
@@ -165,6 +301,7 @@ class Hub {
       }
     });
     ws.on('close', () => {
+      for (const stop of app.chats.values()) stop();
       this.apps = this.apps.filter((a) => a !== app);
       log(`Caliper page disconnected (${this.apps.length} open)`);
       for (const [id, p] of this.pending) {
@@ -591,6 +728,11 @@ const getBackend = () => ({
 });
 
 backend = await acquire();
+// Chat needs the claude command; check for it once, in the background.
+var chatReady = detectClaude().then((info) => {
+  chatInfo = info;
+  log(info.available ? `chat: ${info.version}` : `chat unavailable: ${info.reason}`);
+});
 
 if (HTTP_ONLY) {
   if (backend instanceof Relay) {
@@ -602,6 +744,7 @@ if (HTTP_ONLY) {
   log(`MCP endpoint: http://127.0.0.1:${backend.port}/mcp`);
   log(`Open Caliper: ${u.local || u.hosted}`);
   if (!u.local) log(`Connection code: ${u.code}`);
+  if (backend.open()) log('Opened Caliper in your browser. Its side-panel chat runs on Claude Code here.');
 } else {
   const server = createMcpServer(getBackend, 'stdio');
   const transport = new StdioServerTransport();

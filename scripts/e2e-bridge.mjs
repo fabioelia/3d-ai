@@ -16,7 +16,8 @@ const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const shots = process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'caliper-shots-'));
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'caliper-bridge-'));
 const PORT = 7541;
-const env = { ...process.env, XDG_CONFIG_HOME: path.join(work, 'config'), CALIPER_NO_OPEN: '1', CALIPER_PORT: String(PORT) };
+const chatLog = path.join(work, 'claude-args.log');
+const env = { ...process.env, XDG_CONFIG_HOME: path.join(work, 'config'), CALIPER_NO_OPEN: '1', CALIPER_PORT: String(PORT), CALIPER_CLAUDE_BIN: path.join(ROOT, 'scripts/fake-claude.mjs'), FAKE_CLAUDE_LOG: chatLog };
 
 let failed = 0;
 const ok = (c, m) => {
@@ -143,10 +144,44 @@ ok(json(r).done === true && json(r).selection.elements.length === 1, `ask_user r
 const lines = await page.$$eval('.agent-line', (els) => els.map((e) => e.textContent));
 ok(lines.some((l) => /Claude Code.*replaced the whole part/.test(l)) && lines.some((l) => /Claude Code.*looked at the model/.test(l)), `activity shows in the page (${lines.length} lines)`);
 
+// The side-panel chat runs on Claude Code through the bridge (a stand-in claude here).
+await page.waitForFunction(() => /Claude Code on this computer/.test(document.getElementById('chat-note').textContent), null, { timeout: 15000 }).catch(() => {});
+ok(/Claude Code on this computer/.test(await page.textContent('#chat-note')), `the chat offers Claude Code: ${await page.textContent('#chat-note')}`);
+await page.fill('#chat-input', 'a box please');
+await page.click('#chat-send');
+await page.waitForFunction(() => !document.querySelector('#assistant.running') && /40 mm box/.test(document.getElementById('chat-log').innerText), null, { timeout: 60000 }).catch(() => {});
+let chatState = await page.evaluate(() => ({ name: window.caliper.store.doc.name, log: document.getElementById('chat-log').innerText }));
+ok(chatState.name === 'Chat box' && /I made a 40 mm box/.test(chatState.log) && /Building the model|Model updated/.test(chatState.log), `chat message builds the model through Claude Code: ${chatState.log.split('\n').slice(-4).join(' | ')}`);
+const runs = fs.readFileSync(chatLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((a) => a[0] === '-p');
+const a0 = runs[0];
+ok(a0[a0.indexOf('--tools') + 1] === '' && a0[a0.indexOf('--allowedTools') + 1] === 'mcp__caliper' && a0.includes('--strict-mcp-config') && a0[a0.indexOf('--permission-mode') + 1] === 'dontAsk', 'Claude Code runs with Caliper tools only');
+await page.fill('#chat-input', 'make it taller');
+await page.click('#chat-send');
+await page.waitForFunction(() => !document.querySelector('#assistant.running') && /25 mm tall/.test(document.getElementById('chat-log').innerText), null, { timeout: 60000 }).catch(() => {});
+const runs2 = fs.readFileSync(chatLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((a) => a[0] === '-p');
+const sid = runs2[0].includes('--resume') ? null : runs2[1][runs2[1].indexOf('--resume') + 1];
+const h = await page.evaluate(() => window.caliper.store.doc.features[0]?.h);
+ok(runs2.length === 2 && sid && h === 25, `follow-up resumes the same Claude Code session (${sid}) and edits (h = ${h})`);
+await page.click('text=Undo this change');
+await page.waitForTimeout(800);
+ok((await page.evaluate(() => window.caliper.store.doc.features[0]?.h)) === 10, 'the chat turn can be undone');
+await page.fill('#chat-input', 'this will fail');
+await page.click('#chat-send');
+await page.waitForFunction(() => !document.querySelector('#assistant.running') && document.querySelector('.msg-error'), null, { timeout: 30000 }).catch(() => {});
+ok(/not signed in/.test((await page.textContent('.msg-error')) || ''), `Claude Code errors are explained: ${await page.textContent('.msg-error')}`);
+await page.fill('#chat-input', 'slow box');
+await page.click('#chat-send');
+await page.waitForTimeout(1500);
+await page.click('#chat-stop');
+await page.waitForFunction(() => !document.querySelector('#assistant.running'), null, { timeout: 15000 }).catch(() => {});
+ok(!(await page.evaluate(() => !!document.querySelector('#assistant.running'))), 'Stop cancels a Claude Code run');
+await page.screenshot({ path: path.join(shots, 'bridge-chat.png') });
+
 // A second agent shares the same bridge; an HTTP client attaches too.
 const B = await agent('cursor');
+const pageBodies = await page.evaluate(() => window.caliper.store.results.bodies.length);
 r = await B.call('get_state', { include: ['build'] });
-ok(!r.isError && json(r).build.bodies.length === 2, 'a second agent (second bridge process) reaches the same page');
+ok(!r.isError && json(r).build.bodies.length === pageBodies, 'a second agent (second bridge process) reaches the same page');
 const H = new Client({ name: 'mcp-inspector', version: '1.0.0' });
 await H.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`)));
 r = await H.callTool({ name: 'get_state', arguments: { include: ['view'] } });
@@ -160,7 +195,7 @@ await A.client.close();
 await page.waitForFunction(() => document.getElementById('agent-btn').dataset.state === 'live', null, { timeout: 30000 }).catch(() => {});
 await new Promise((res) => setTimeout(res, 1500));
 r = await B.call('get_state', { include: ['build'] });
-ok(!r.isError && json(r).build?.bodies?.length === 2, `after the first agent quits, the second keeps working: ${textOf(r).slice(0, 100)}`);
+ok(!r.isError && json(r).build?.bodies?.length === pageBodies, `after the first agent quits, the second keeps working: ${textOf(r).slice(0, 100)}`);
 
 ok(pageErrors.length === 0, `no page errors${pageErrors.length ? `: ${pageErrors.join(' | ')}` : ''}`);
 await H.close();

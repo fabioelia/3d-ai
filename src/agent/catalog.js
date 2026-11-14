@@ -1,5 +1,5 @@
-// The tools Caliper offers to AI agents. Plain data, shared by the MCP bridge (bridge/server.mjs) and
-// the built-in assistant, so every agent sees the same surface. Implementations: src/agent/tools.js.
+// The tools Caliper offers to AI agents. Plain data, served by the MCP bridge (bridge/server.mjs), so
+// every agent sees the same surface. Implementations: src/agent/tools.js.
 
 const selector = {
   description:

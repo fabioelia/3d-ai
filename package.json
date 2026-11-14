@@ -7,7 +7,7 @@
     "dev": "node scripts/prepare-kernel.mjs && vite",
     "preview": "vite preview",
     "artifact": "npm run bundle && node scripts/make-artifact.mjs",
-    "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-assistant.cjs",
+    "test:e2e": "node scripts/e2e.cjs",
     "deploy": "npm run bundle && node scripts/deploy-pages.mjs",
     "bridge": "node bridge/server.mjs --http",
     "test:bridge": "node scripts/e2e-bridge.mjs",
@@ -21,7 +21,6 @@
     "ws": "8.18.3"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^1.8.0",
     "dejavu-fonts-ttf": "^2.37.3",
     "manifold-3d": "^3.5.4",
     "replicad": "^1.2.1",

@@ -9,7 +9,7 @@ A browser CAD tool for 3D-printable parts, in the spirit of Fusion's sketch → 
 - **Sketching without constraints.** Rectangles, circles, polygons, slots, line paths and text snap to a grid and to each other; exact sizes go in the inspector. A shape drawn inside another becomes a cut-out.
 - **Direct manipulation.** Click a face to sketch on it or push/pull it; click edges to fillet or chamfer them; click a face and Shell to hollow the part.
 - **Agents over MCP.** Claude Code, Claude Desktop, Cursor or any MCP client gets the whole app as tools: the full state, screenshots of what you see, exact geometry and measurements, printability checks, every edit, your selection, your camera, import and export. See [Use it with an AI agent](#use-it-with-an-ai-agent-mcp).
-- **Built-in assistant.** The same tools, in a side panel, with your own Claude account (as a Claude artifact) or an API key.
+- **Chat in Caliper.** Type in the side panel; your message goes over MCP to Claude Code on your computer, which works on the model with the same tools and replies there. No API key: it uses your Claude login.
 - **STL import.** Drop STL files, or the zip a model site gave you, on the window. Common export defects (zero-area slivers, T-junctions, duplicate faces, near-miss vertices) are repaired automatically. Small clean meshes become exact solids whose flat faces you can sketch on, fillet and shell; large ones become mesh bodies you can move, cut, join and pattern; files that still are not closed solids come in as reference meshes you can view, move, measure and export.
 - **Export.** Binary STL (three mesh qualities) and STEP. Projects save as JSON, with imported STLs embedded, and autosave in the browser.
 
@@ -17,7 +17,15 @@ A browser CAD tool for 3D-printable parts, in the spirit of Fusion's sketch → 
 
 The Caliper bridge is a small MCP server that runs on your computer. The agent talks MCP to it; Caliper, open in your browser, connects to it over a local WebSocket. Every tool call runs against the live model in your tab, so you see each change land in the timeline and the agent sees what you see.
 
-**Claude Code**
+**Chat from Caliper's side panel** (needs [Claude Code](https://claude.com/claude-code) installed and signed in):
+
+```bash
+npx -y github:fabioelia/3d-ai --http
+```
+
+This starts the bridge and opens Caliper in your browser. Type in the side panel: each message runs Claude Code headless on your computer (`claude -p`), with only Caliper's tools enabled (no shell, files or web), and its reply and actions stream back into the panel. Follow-up messages continue the same Claude Code session; **Clear** starts a new one. One message's changes undo together.
+
+**Or drive it from a Claude Code session**
 
 ```bash
 claude mcp add caliper -- npx -y github:fabioelia/3d-ai
@@ -86,7 +94,7 @@ The build uses relative URLs, so it works under `/3d-ai/` or any other path with
 
 `dist/` is a static site; host its four files together anywhere. `index.html` also works opened straight from disk, in which case the kernel and font are fetched from a public CDN instead.
 
-Outside claude.ai the built-in assistant calls the Claude API directly from the browser with a key you paste into its settings (stored in that browser only). `npm run artifact` additionally writes `dist/artifact.html`, the body-only page for publishing as a Claude artifact, where the assistant uses the viewer's own Claude instead of a key and exports go through the viewer's save prompt (as a `.zip`, because artifacts cannot save `.stl` directly).
+`npm run artifact` additionally writes `dist/artifact.html`, the body-only page for publishing as a Claude artifact. An artifact cannot reach the bridge on your computer, so there the chat panel points to the hosted app instead; modelling works as usual, and exports go through the viewer's save prompt (as a `.zip`, because artifacts cannot save `.stl` directly).
 
 ## Using it
 
@@ -116,11 +124,11 @@ Mouse: drag orbits, right-drag pans, scroll zooms. While sketching, drag draws a
 | `src/viewport.js` | three.js view: bodies, face and edge picking, highlights, camera. |
 | `src/sketcher.js`, `sketchgeo.js` | Drawing and editing 2D shapes on a plane. |
 | `src/actions.js`, `ui.js`, `schema.js` | Commands, panels, and the per-feature field definitions the inspector is generated from. |
-| `src/agent/catalog.js` | The agent tools: names, descriptions, input schemas. Shared by the bridge and the built-in assistant. |
+| `src/agent/catalog.js` | The agent tools: names, descriptions, input schemas. Served by the bridge to every agent. |
 | `src/agent/tools.js` | What each tool does inside the page; results are MCP content (text and PNG images). |
 | `src/agent/link.js`, `panel.js` | The page's WebSocket to the bridge, the Agent menu, agent activity, and the prompt bar for `ask_user`. |
 | `bridge/server.mjs` | The MCP server (stdio and Streamable HTTP), the local web server and WebSocket hub, file import/export on disk. |
-| `src/assistant.js`, `guide.js` | The built-in chat, and the briefing every agent gets (the document format and how to work). |
+| `src/assistant.js`, `guide.js` | The side-panel chat (relayed to Claude Code through the bridge), and the briefing every agent gets (the document format and how to work). |
 | `src/export.js` | Saving files (direct download, or zipped through the artifact save prompt). |
 
 Picked faces and edges are stored with their position in the body *and* a geometric signature. When an earlier dimension changes, the kernel re-finds them and refreshes the signature, so a fillet follows its edge as the part grows. If the edge truly disappears, the feature reports that instead of silently filleting something else.
@@ -130,11 +138,11 @@ Picked faces and edges are stored with their position in the body *and* a geomet
 ```bash
 npm test                 # kernel and STL import: documents checked against hand-computed volumes and bounds
 npm run bundle && node scripts/make-artifact.mjs && npm run preview &
-npm run test:e2e         # headless Chromium: modelling flows, import, exports, built-in assistant plumbing
+npm run test:e2e         # headless Chromium: modelling flows, import, exports
 npm run test:bridge      # real MCP clients (stdio and HTTP) driving a real browser tab through the bridge
 ```
 
-The end-to-end scripts need Playwright with Chromium available to `require('playwright')`. The assistant tests stub Claude (both the artifact capability and the API), so they check the plumbing — prompt contents, tool execution, build reports, undo — not the quality of Claude's designs.
+The end-to-end scripts need Playwright with Chromium available to `require('playwright')`. The bridge suite runs the side-panel chat against `scripts/fake-claude.mjs`, a stand-in for the `claude` command that speaks its stream format and calls real Caliper tools over MCP; it checks the plumbing (tool restrictions, streaming, session resume, undo, errors, Stop), not the quality of Claude's designs. Set `CALIPER_CLAUDE_BIN` to point the bridge at another `claude` executable.
 
 ## Limits worth knowing
 

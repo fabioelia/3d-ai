@@ -122,19 +122,11 @@
         <div class="as-head">
           <h2 class="sec-title">Assistant</h2>
           <span class="grow"></span>
-          <button class="link-btn" id="chat-settings-btn" type="button" hidden>Settings</button>
+          <button class="link-btn" id="chat-connect" type="button" hidden>Connect</button>
           <button class="link-btn" id="chat-clear" type="button" title="Start a new conversation">Clear</button>
         </div>
-        <div class="as-settings" id="chat-settings" hidden>
-          <label for="api-key">Claude API key</label>
-          <input class="in" id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
-          <label for="api-model">Model</label>
-          <select class="in" id="api-model"></select>
-          <p class="menu-note">The key stays in this browser's storage and is sent only to api.anthropic.com. Use a key with a spend limit.</p>
-          <button class="btn primary" id="api-save" type="button">Save</button>
-        </div>
         <div class="chat-log" id="chat-log" aria-live="polite"></div>
-        <p class="as-empty" id="chat-empty">Describe a part and get a first draft you can edit, or ask for changes to this one. Select a face or edge first to say “this”.</p>
+        <p class="as-empty" id="chat-empty">Describe a part and Claude builds a first draft you can edit, or ask for changes to this one. Select a face or edge first to say “this”.</p>
         <div class="suggests" id="chat-suggest"></div>
         <form class="chat-form" id="chat-form">
           <textarea class="in" id="chat-input" rows="2" aria-label="Message to the assistant" placeholder="Describe a part, or a change to this one"></textarea>
