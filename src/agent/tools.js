@@ -8,6 +8,9 @@ import * as act from '../actions.js';
 import { putFile, fromB64, toB64, embedFiles } from '../files.js';
 import { saveFile, safeName } from '../export.js';
 import { toolByName } from './catalog.js';
+import { evalExpr } from '../expr.js';
+import { checkBoard, airwires, autoPlace, overBoard, turnPart, flipPart, bodyCenter } from '../board/geometry.js';
+import { eagleScript } from '../board/script.js';
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const r3 = (p) => (Array.isArray(p) ? p.map((x) => Math.round(x * 1000) / 1000) : p);
@@ -51,7 +54,7 @@ export function buildReport(res = store.results) {
     bodies: res.bodies.map((b) => ({
       id: b.id,
       name: b.name,
-      kind: b.isReference ? 'reference mesh (not a closed solid; cannot be cut or joined)' : b.isMesh ? 'mesh' : 'solid',
+      kind: b.kind === 'board' ? 'circuit board (not printed; never joined or cut unless named as a target)' : b.kind === 'part' ? `board part ${b.ref} on ${b.board}` : b.isReference ? 'reference mesh (not a closed solid; cannot be cut or joined)' : b.isMesh ? 'mesh' : 'solid',
       size_mm: b.max.map((v, i) => r2(v - b.min[i])),
       min: r3(b.min),
       max: r3(b.max),
@@ -74,6 +77,10 @@ function viewState() {
     if (sel.shape) out.open_sketch.selected_shape = sel.shape;
   } else if (mode.kind === 'pick') {
     out.mode = `picking ${mode.pick}s for ${mode.feature}; features from it on are hidden until picking is done`;
+  } else if (mode.kind === 'board') {
+    const f = featureById(mode.id);
+    out.mode = `placing parts on ${mode.id} in the board placement editor (a 2D top view${act.app.board?.flip ? ', seen from below' : ''}; the 3D view is behind it until they press Done)`;
+    out.board_editor = { board: mode.id, tool: mode.tool || 'select', grid_mm: act.app.board?.grid, ...(sel.shape ? { selected: String(sel.shape).startsWith('hole:') ? { hole: Number(String(sel.shape).slice(5)), ...f?.holes?.[Number(String(sel.shape).slice(5))] } : { part: sel.shape } } : {}) };
   } else if (mode.kind === 'plane') out.mode = 'starting a sketch: choosing a plane';
   else out.mode = 'modelling';
   const picks = mode.kind === 'pick' ? (featureById(mode.feature)?.[mode.key]?.pick || []).map((p) => ({ kind: mode.pick, b: p.b, i: p.i })) : sel.picks;
@@ -189,6 +196,13 @@ const IMPL = {
   async screenshot(args, ctx) {
     await ready();
     const size = { small: [640, 480], medium: [1024, 768], large: [1600, 1200] }[args.size || 'medium'] || [1024, 768];
+    if (args.view === 'board' || (store.mode.kind === 'board' && (!args.view || args.view === 'current'))) {
+      const b = findBoard(args.board);
+      const dataUrl = await act.app.board.snapshot({ width: size[0], height: size[1], board: b, flip: !!args.from_below });
+      const info = { view: 'board', board: b.id, from_below: !!args.from_below, legend: 'Top-down placement view. Green: the board; grey holes; coloured blocks: part bodies with copper pads and their refs; yellow lines: airwires (connections still to route); red outline: a part with a placement problem; dashed: footprint, or a part not on the board yet (waiting at the left).', summary: boardSummary(b) };
+      if (ctx.noImages) return ok(text(info));
+      return ok({ type: 'image', data: dataUrl.split(',')[1], mimeType: 'image/png' }, text(info));
+    }
     let highlight = null;
     if (args.highlight !== undefined) {
       const kind = guessKind(args.highlight, args.kind);
@@ -344,6 +358,11 @@ const IMPL = {
         act.editSketch(f.id);
         break;
       }
+      case 'edit_board': {
+        const f = findBoard(args.feature);
+        act.editBoard(f.id);
+        break;
+      }
       case 'finish_sketch':
         if (store.mode.kind !== 'sketch') return fail('No sketch is open.');
         act.finishSketch();
@@ -408,12 +427,147 @@ const IMPL = {
       const { example, ...doc } = store.doc;
       name = `${base}.caliper.json`;
       bytes = new TextEncoder().encode(JSON.stringify(await embedFiles(doc)));
-    } else return fail('format must be stl, step or project.');
+    } else if (args.format === 'eagle_script') {
+      const b = findBoard(args.board);
+      name = `${safeName(featureLabel(b))}-placement.scr`;
+      bytes = new TextEncoder().encode(eagleScript(b, num, { name: featureLabel(b) }));
+      note = 'Run it in the Eagle or Fusion Electronics board editor: File > Execute Script.';
+    } else return fail('format must be stl, step, project or eagle_script.');
     logActivity(ctx.by, `exported ${name}`);
     if (ctx.transport === 'bridge') return { content: [text({ file: name, bytes: bytes.length, ...(note ? { note } : {}) })], files: [{ name, path: args.path || null, data: toB64(bytes) }] };
     const msg = await saveFile(name, bytes, 'application/octet-stream');
     return ok(text({ file: name, bytes: bytes.length, saved: msg || 'The person declined the save.', ...(note ? { note } : {}) }));
   },
+};
+
+// ---------- boards ----------
+const num = (v) => {
+  try {
+    return evalExpr(v ?? 0, store.results?.params || {});
+  } catch {
+    return 0;
+  }
+};
+
+function findBoard(id) {
+  const boards = store.doc.features.filter((f) => f.type === 'board');
+  if (id) {
+    const f = featureById(id) || boards.find((b) => featureLabel(b) === id);
+    if (!f || f.type !== 'board') throw new Error(`There is no board "${id}". Boards: ${boards.map((b) => b.id).join(', ') || 'none'}.`);
+    return f;
+  }
+  const cur = featureById(store.mode.kind === 'board' ? store.mode.id : store.sel.feature);
+  if (cur?.type === 'board') return cur;
+  if (!boards.length) throw new Error('There is no board yet. Import an Eagle .sch or .brd with import_file, or add a "board" feature with edit_model.');
+  if (boards.length > 1) throw new Error(`There are several boards (${boards.map((b) => b.id).join(', ')}); say which one with "board".`);
+  return boards[0];
+}
+
+function boardSummary(b) {
+  const issues = checkBoard(b, num);
+  const wires = airwires(b);
+  const parts = b.parts || [];
+  return {
+    board: b.id,
+    outline: b.outline,
+    thickness: b.thickness ?? 1.6,
+    holes: b.holes || [],
+    placed: parts.filter((p) => !p.off).length,
+    total: parts.length,
+    not_placed: parts.filter((p) => p.off).map((p) => p.ref),
+    problems: issues.filter((i) => i.kind !== 'unplaced').map((i) => i.message),
+    airwires: wires.length,
+    airwire_length_mm: Math.round(wires.filter((w) => !w.offBoard).reduce((s, w) => s + w.length, 0)),
+  };
+}
+
+function partRow(p) {
+  const c = bodyCenter({ ...p, x: num(p.x), y: num(p.y) });
+  return { ref: p.ref, value: p.value, package: p.package, x: p.x, y: p.y, rot: p.rot || 0, side: p.side || 'top', on_board: !p.off, body_mm: [num(p.body?.w), num(p.body?.d), num(p.h)], ...(num(p.lift) ? { lift: p.lift } : {}), body_center: c.map((v) => Math.round(v * 100) / 100) };
+}
+
+IMPL.place_parts = async (args, ctx) => {
+  await ready();
+  const b = findBoard(args.board);
+  const problems = [];
+  let arranged = null;
+  const changed = update(
+    (doc) => {
+      const f = doc.features.find((x) => x.id === b.id);
+      if (args.outline) f.outline = args.outline;
+      if (args.thickness !== undefined) f.thickness = args.thickness;
+      if (args.at) f.at = args.at;
+      if (args.rot) f.rot = args.rot;
+      if (args.holes) f.holes = args.holes;
+      for (const ch of args.parts || []) {
+        let p = f.parts.find((q) => q.ref === ch.ref);
+        if (!p && ch.add) {
+          p = { ref: ch.ref, value: ch.value || 'Block', package: ch.package || 'BLOCK', x: 0, y: 0, rot: 0, side: 'top', h: 5, body: { cx: 0, cy: 0, w: 10, d: 10 }, shape: 'box', pads: {}, color: '#2f5b8f' };
+          f.parts.push(p);
+        }
+        if (!p) {
+          problems.push(`There is no part ${ch.ref} on ${b.id}.`);
+          continue;
+        }
+        if (ch.remove) {
+          f.parts = f.parts.filter((q) => q !== p);
+          continue;
+        }
+        if (ch.side && ch.side !== (p.side || 'top')) flipPart(p);
+        if (ch.turn) turnPart(p, Number(ch.turn));
+        for (const k of ['x', 'y', 'rot', 'h', 'lift', 'shape', 'value', 'color']) if (ch[k] !== undefined) p[k] = ch[k];
+        if (ch.body) p.body = { ...p.body, ...ch.body };
+        if (ch.center) {
+          // Place by the centre of the body rather than the package origin.
+          const now = bodyCenter({ ...p, x: num(p.x), y: num(p.y) });
+          p.x = Math.round((num(p.x) + num(ch.center[0]) - now[0]) * 1000) / 1000;
+          p.y = Math.round((num(p.y) + num(ch.center[1]) - now[1]) * 1000) / 1000;
+        }
+        if (ch.off === true) p.off = true;
+        else if (ch.off === false || ch.x !== undefined || ch.y !== undefined || ch.center) {
+          if (overBoard(p, f, num) || ch.off === false) delete p.off;
+          else p.off = true;
+        }
+      }
+      if (args.arrange) {
+        const which = args.arrange === 'rest' ? f.parts.filter((p) => p.off).map((p) => p.ref) : Array.isArray(args.arrange) ? args.arrange : null;
+        arranged = autoPlace(f, num, { which, sides: args.sides || ['top'], gap: args.gap ?? 1, margin: args.margin ?? 1 });
+      }
+    },
+    { by: ctx.by },
+  );
+  const res = await act.app.rebuildNow();
+  const err = res?.features?.[b.id]?.error;
+  const fresh = featureById(b.id);
+  return ok(
+    text({
+      changed,
+      ...(arranged ? { arranged } : {}),
+      ...(problems.length ? { problems_with_request: problems } : {}),
+      ...(err ? { error: err } : {}),
+      summary: boardSummary(fresh),
+      next: 'Look with screenshot (view "board" for the placement, "iso" for 3D), then check_board against the enclosure.',
+    }),
+  );
+};
+
+IMPL.check_board = async (args) => {
+  await ready();
+  const b = findBoard(args.board);
+  if (store.mode.kind !== 'board') await act.app.rebuildNow();
+  const out = boardSummary(b);
+  const issues = checkBoard(b, num, { edge: args.edge_clearance ?? 0.5, holeClearance: args.hole_clearance ?? 0.5 });
+  out.problems = issues.map((i) => ({ kind: i.kind, parts: i.refs, message: i.message }));
+  if (args.enclosure !== false) {
+    const fit = await act.app.kernel.interference({ board: b.id, clearance: args.clearance ?? 0.5 });
+    out.enclosure = fit.bodies ? { checked_against: fit.bodies, issues: fit.issues.map((i) => (i.kind === 'collides' ? `${i.part} runs into ${i.body} (${i.bodyId}): ${i.volume} mm³ overlap.` : `${i.part} is ${i.distance} mm from ${i.body} (${i.bodyId}).`)) } : { note: 'No other bodies to check against (model or import the enclosure).' };
+  }
+  const wires = airwires(b);
+  const byNet = new Map();
+  for (const w of wires) byNet.set(w.net, (byNet.get(w.net) || 0) + w.length);
+  out.longest_nets = [...byNet.entries()].sort((x, y) => y[1] - x[1]).slice(0, 10).map(([net, len]) => ({ net, length_mm: Math.round(len) }));
+  if (args.parts !== false) out.parts = (b.parts || []).map(partRow);
+  return ok(text(out));
 };
 
 function guessKind(sel, kind) {
@@ -442,9 +596,9 @@ function boundsOf(ref) {
 
 // ---------- printability ----------
 function printability({ overhang_angle = 45, build_volume } = {}) {
-  const list = bodies();
-  if (!list.length) return { ok: false, note: 'There is nothing to print yet.' };
-  const res = store.results;
+  const list = bodies().filter((b) => !b.kind); // circuit boards and their parts are not printed
+  if (!list.length) return { ok: false, note: bodies().length ? 'Only a circuit board and its parts are here; they are not printed. Model the enclosure first.' : 'There is nothing to print yet.' };
+  const res = { min: [0, 1, 2].map((k) => Math.min(...list.map((b) => b.min[k]))), max: [0, 1, 2].map((k) => Math.max(...list.map((b) => b.max[k]))) };
   const bed = res.min[2];
   const limit = Math.sin((overhang_angle * Math.PI) / 180);
   const issues = [];

@@ -1,8 +1,11 @@
 // Commands: everything the toolbar, timeline, viewport clicks and keyboard can do to the document.
 import { store, update, select, setMode, newFeatureId, featureById, emit } from './store.js';
 import { FEATURES, DEFAULTS, MAKES_TOOL } from './schema.js';
+import { readEagle, isEagle } from './board/eagle.js';
+import { boardPolygon } from './board/geometry.js';
+import { bounds } from './sketchgeo.js';
 
-export const app = { viewport: null, sketcher: null, kernel: null, toast: () => {}, rebuildNow: async () => null };
+export const app = { viewport: null, sketcher: null, board: null, kernel: null, toast: () => {}, rebuildNow: async () => null };
 
 const round = (v) => Math.round(v * 1000) / 1000;
 
@@ -69,6 +72,11 @@ export function moveFeature(id, delta) {
 export function leaveMode() {
   const { mode } = store;
   if (mode.kind === 'sketch') return finishSketch();
+  if (mode.kind === 'board') {
+    setMode({ kind: 'model' });
+    select({ feature: mode.id, shape: null });
+    return;
+  }
   app.viewport.showPlanes(false);
   if (mode.kind !== 'model') setMode({ kind: 'model' });
 }
@@ -117,6 +125,49 @@ export function finishSketch() {
     addFeature('extrude', { sketch: id, distance: 10, op: hasBodies() ? 'join' : 'new', ...(onFace ? { op: 'join' } : {}) });
     app.toast('Sketch finished. Set the extrude distance, or switch the operation to Cut.');
   } else select({ feature: id, shape: null });
+}
+
+// ---------- boards ----------
+const BOARD_EXT = /\.(sch|brd)$/i;
+
+export function editBoard(id) {
+  const f = featureById(id);
+  if (!f || f.type !== 'board') return;
+  if (store.mode.kind !== 'model' && !(store.mode.kind === 'board' && store.mode.id === id)) leaveMode();
+  select({ feature: id, shape: null, picks: [] });
+  setMode({ kind: 'board', id, tool: 'select' });
+}
+
+export function setBoardTool(tool) {
+  if (store.mode.kind !== 'board') return;
+  store.mode = { ...store.mode, tool };
+  emit('mode');
+}
+
+// A board feature from Eagle props (or an empty one), centred on the bed with its lowest part on it.
+export function addBoard(props = {}, { by = 'user', name = null } = {}) {
+  const b = { thickness: 1.6, holes: [], parts: [], nets: [], outline: { kind: 'rect', w: 60, h: 40, r: 2 }, ...props };
+  const bb = bounds(boardPolygon(b));
+  const below = Math.max(0, ...b.parts.filter((p) => !p.off && p.side === 'bottom').map((p) => (Number(p.lift) || 0) + (Number(p.h) || 0)));
+  const at = [-bb.cx, -bb.cy, below].map((v) => Math.round(v * 1000) / 1000 || 0);
+  const count = store.doc.features.filter((f) => f.type === 'board').length;
+  return addFeature('board', { name: name || `Board ${count + 1}`, ...b, at }, { by });
+}
+
+export function addBoardPart(boardId) {
+  let ref = null;
+  update((doc) => {
+    const f = doc.features.find((x) => x.id === boardId);
+    if (!f) return;
+    f.parts ||= [];
+    let i = 1;
+    while (f.parts.some((p) => p.ref === `P${i}`)) i++;
+    ref = `P${i}`;
+    const bb = bounds(boardPolygon(f));
+    f.parts.push({ ref, value: 'Block', package: 'BLOCK', x: Math.round(bb.cx), y: Math.round(bb.cy), rot: 0, side: 'top', h: 5, body: { cx: 0, cy: 0, w: 10, d: 10 }, shape: 'box', pads: {}, color: '#2f5b8f' });
+  });
+  if (ref) select({ shape: ref });
+  return ref;
 }
 
 export function startPick(feature, key, kind) {
@@ -181,6 +232,7 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
   const { readZip, realEntry, MODEL_EXT, inflateRawWeb } = await import('./zip.js');
   const skipped = [];
   const parts = [];
+  const boards = [];
   for (const item of items) {
     const name = item.name || 'model.stl';
     // Files are Blobs (which have their own bytes() method these days); plain { name, bytes } items
@@ -197,19 +249,28 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
         const found = await readZip(bytes, inflateRawWeb, { accept: realEntry });
         for (const e of found) {
           if (MODEL_EXT.test(e.name)) parts.push(e);
+          else if (BOARD_EXT.test(e.name)) {
+            boards.push(e);
+            others?.push(e); // the chat also hands the schematic itself to Claude
+          }
           else if (others) others.push(e);
           else skipped.push(e.name);
         }
-        if (!found.some((e) => MODEL_EXT.test(e.name))) app.toast(`${name} has no 3D files inside (STL, STEP, OBJ or 3MF).`, 'error');
+        if (!found.some((e) => MODEL_EXT.test(e.name) || BOARD_EXT.test(e.name))) app.toast(`${name} has no 3D files or circuit boards inside (STL, STEP, OBJ, 3MF, Eagle .sch or .brd).`, 'error');
       } catch (e) {
         app.toast(`${name}: ${e.message}`, 'error');
       }
     } else if (MODEL_EXT.test(name)) parts.push({ name, bytes });
+    else if (BOARD_EXT.test(name) || (/\.(xml|eagle)$/i.test(name) && isEagle(bytes))) {
+      boards.push({ name, bytes });
+      others?.push({ name, bytes });
+    }
     else if (others) others.push({ name, bytes });
-    else app.toast(`${name} is not a 3D file Caliper can import (STL, STEP, OBJ, 3MF, or a zip of them).`, 'error');
+    else app.toast(`${name} is not a file Caliper can import (STL, STEP, OBJ, 3MF, Eagle .sch or .brd, or a zip of them).`, 'error');
   }
   if (skipped.length) app.toast(`Skipped ${skipped.join(', ')}: not 3D files. Drop the zip into the chat to share them with Claude.`);
-  if (!parts.length) return [];
+  const boardIds = boards.length ? importBoards(boards, { by }) : [];
+  if (!parts.length) return boardIds;
   if (store.mode.kind !== 'model') leaveMode();
   const many = parts.length > 1;
   const key = `import:${Date.now()}`;
@@ -258,6 +319,7 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
     );
     res = await app.rebuildNow();
   }
+  if (boardIds.length) added.push(...boardIds);
   select({ feature: added[added.length - 1], shape: null }, { by });
   app.viewport.fit();
   const errs = added.map((id) => res?.features?.[id]?.error).filter(Boolean);
@@ -270,6 +332,28 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
     app.toast(`Imported ${added.length} parts${fixed ? `, repaired ${fixed}` : ''}${ref ? `; ${ref} came in as reference meshes because they are not closed solids` : ''}. Click a part in the timeline for details.`);
   }
   return added;
+}
+
+// Eagle / Fusion Electronics files become board features. A board file wins over the schematic of
+// the same name, since it knows where the parts go.
+function importBoards(files, { by }) {
+  const base = (n) => n.replace(/^.*[\\/]/, '').replace(BOARD_EXT, '').toLowerCase();
+  const withBoard = new Set(files.filter((f) => /\.brd$/i.test(f.name)).map((f) => base(f.name)));
+  const ids = [];
+  for (const file of files) {
+    if (/\.sch$/i.test(file.name) && withBoard.has(base(file.name))) continue;
+    try {
+      const { props, notes } = readEagle(file.bytes, file.name.replace(/^.*[\\/]/, ''));
+      if (store.mode.kind !== 'model') leaveMode();
+      const f = addBoard(props, { by, name: file.name.replace(/^.*[\\/]/, '').replace(BOARD_EXT, '') });
+      ids.push(f.id);
+      app.toast(`${file.name}: ${props.parts.length} parts, ${props.nets.length} nets. ${notes.join(' ')}${by === 'user' ? ' Opening the placement editor.' : ''}`);
+      if (by === 'user') editBoard(f.id);
+    } catch (e) {
+      app.toast(`${file.name}: ${e.message}`, 'error');
+    }
+  }
+  return ids;
 }
 
 // ---------- toolbar ----------
@@ -304,6 +388,16 @@ export function command(name) {
       return startSketch();
     case 'import':
       return document.getElementById('import-file')?.click();
+    case 'board': {
+      const cur = featureById(store.sel.feature);
+      const boards = store.doc.features.filter((f) => f.type === 'board');
+      const target = cur?.type === 'board' ? cur : boards[boards.length - 1];
+      if (target) return editBoard(target.id);
+      const f = addBoard({}, { by: 'user' });
+      editBoard(f.id);
+      app.toast('New board. Import an Eagle or Fusion Electronics schematic (.sch) or board (.brd) to bring in its parts, or add blocks for them; set the outline in the inspector.');
+      return f;
+    }
     case 'box':
     case 'cylinder':
     case 'cone':

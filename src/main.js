@@ -3,6 +3,7 @@ import './style.css';
 import { Kernel } from './kernel/client.js';
 import { Viewport } from './viewport.js';
 import { Sketcher } from './sketcher.js';
+import { BoardEditor } from './board/editor.js';
 import { store, on, emit, update, select, loadSaved, visibleDoc, featureById, replaceDoc, undo, redo, setMode, EXAMPLE_DOC, normalize } from './store.js';
 import { initUI, toast, showTab } from './ui.js';
 import { initAssistant, attachFiles } from './assistant.js';
@@ -32,7 +33,32 @@ const sketcher = new Sketcher(viewport, $('sk-label'), {
   selectedShape: () => store.sel.shape,
   setTool: (tool) => act.setSketchTool(tool),
 });
-Object.assign(act.app, { viewport, sketcher, kernel, toast, rebuildNow });
+const boardEditor = new BoardEditor(document.querySelector('.stage'), {
+  board: () => {
+    const f = featureById(store.mode.kind === 'board' ? store.mode.id : store.sel.feature);
+    return f?.type === 'board' ? f : null;
+  },
+  scope: () => store.results?.params || {},
+  change: (fn, key) => {
+    const id = store.mode.kind === 'board' ? store.mode.id : store.sel.feature;
+    update(
+      (doc) => {
+        const f = doc.features.find((x) => x.id === id);
+        if (f && f.type === 'board') fn(f);
+      },
+      { key },
+    );
+  },
+  select: (ref) => select({ shape: ref }),
+  selected: () => (store.mode.kind === 'board' ? store.sel.shape : null),
+  hover: (text) => {
+    $('readout').textContent = text;
+  },
+  tool: () => (store.mode.kind === 'board' ? store.mode.tool || 'select' : 'select'),
+  setTool: (t) => act.setBoardTool(t),
+  toast: (m) => toast(m),
+});
+Object.assign(act.app, { viewport, sketcher, board: boardEditor, kernel, toast, rebuildNow });
 
 // ---------- rebuild loop ----------
 let timer = null;
@@ -139,6 +165,9 @@ function syncHighlights() {
 let lastModeKind = 'model';
 on('mode', () => {
   const { mode } = store;
+  if (mode.kind === 'board' && !boardEditor.active) boardEditor.enter();
+  else if (mode.kind !== 'board' && boardEditor.active) boardEditor.exit();
+  else if (boardEditor.active) boardEditor.render();
   viewport.pickFilter = mode.kind === 'model' ? 'any' : mode.kind === 'plane' ? 'plane' : mode.kind === 'pick' ? mode.pick : 'none';
   viewport.showPlanes(mode.kind === 'plane');
   viewport.setHighlights({ hover: null });
@@ -155,11 +184,17 @@ on('mode', () => {
 on('doc', () => {
   scheduleRebuild();
   if (sketcher.active) sketcher.redraw();
+  if (boardEditor.active) {
+    if (!featureById(store.mode.id)) act.leaveMode();
+    else boardEditor.render();
+  }
 });
 on('select', () => {
   syncHighlights();
   if (sketcher.active) sketcher.redraw();
+  if (boardEditor.active) boardEditor.render();
 });
+on('results', () => boardEditor.active && boardEditor.render());
 
 viewport.handlers = {
   click: (pick, evt) => act.viewportClick(pick, evt),
@@ -171,7 +206,11 @@ viewport.handlers = {
   pointer: (type, evt) => {
     if (store.mode.kind === 'sketch') sketcher.pointer(type, evt);
   },
-  theme: () => sketcher.redraw(),
+  theme: () => {
+    sketcher.redraw();
+    boardEditor.readColors();
+    boardEditor.render();
+  },
 };
 
 // ---------- keyboard ----------
@@ -195,6 +234,10 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (store.mode.kind === 'sketch' && sketcher.key(e)) {
+    e.preventDefault();
+    return;
+  }
+  if (store.mode.kind === 'board' && !mod && boardEditor.key(e)) {
     e.preventDefault();
     return;
   }
@@ -328,12 +371,12 @@ window.addEventListener('drop', (e) => {
     });
     if (!files.some((f) => /\.(stl|zip)$/i.test(f.name))) return;
   }
-  const stls = files.filter((f) => /\.(stl|step|stp|obj|3mf|zip)$/i.test(f.name));
+  const stls = files.filter((f) => /\.(stl|step|stp|obj|3mf|zip|sch|brd)$/i.test(f.name));
   // Other files (notes, schematics) go to the chat for Claude to read.
   const docs = files.filter((f) => !pictures.includes(f) && !stls.includes(f));
   if (docs.length) attachFiles(docs).then((ok) => ok && (showTab('assistant'), toast(`Attached ${docs.map((f) => f.name).join(', ')} to your next chat message.`)));
   if (stls.length) act.importFiles(stls);
-  else if (!pictures.length && !docs.length) toast('Drop 3D files (STL, STEP, OBJ, 3MF or a zip) to import them, other files to share them with Claude, or a .caliper.json project to open it.', 'error');
+  else if (!pictures.length && !docs.length) toast('Drop 3D files (STL, STEP, OBJ, 3MF or a zip) or Eagle boards (.sch, .brd) to import them, other files to share them with Claude, or a .caliper.json project to open it.', 'error');
 });
 
 // ---------- theme ----------

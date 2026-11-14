@@ -4,6 +4,7 @@
 import { evalExpr, resolveParams } from '../expr.js';
 import { BASE_PLANES, frameFromFace, offsetFrame, toWorld, v3, axisVec } from '../frame.js';
 import { pathPoints } from '../sketchgeo.js';
+import { boardPolygon, bodyCenter } from '../board/geometry.js';
 import { detectFormat, parseMesh, readSTEPSolid } from './formats.js';
 import { parseSTL, repairMesh, weldMesh, closedVolume, describeRepairs, meshToSTL, stlToSolid, stlToMesh, meshDisplay, meshTriangles, RawMesh, rawDisplay, SOLID_TRIANGLE_LIMIT } from './stl.js';
 
@@ -545,8 +546,9 @@ export function createKernel(r) {
     if (wanted && !targets.length) fail(`No body named "${wanted.join(', ')}".`);
     if (!wanted) {
       if (hintBody !== undefined && op === 'join' && bodies[hintBody]) targets = [hintBody];
-      // Reference meshes never take part in booleans unless they are named as the target.
-      else targets = targets.filter((i) => !isRaw(bodies[i].shape) && boxesTouch(topo(bodies[i].shape), tb));
+      // Reference meshes, boards and their parts never take part in booleans unless they are named
+      // as the target.
+      else targets = targets.filter((i) => !isRaw(bodies[i].shape) && !bodies[i].kind && boxesTouch(topo(bodies[i].shape), tb));
     }
     if (op === 'new' || (op === 'join' && !targets.length)) {
       bodies.push({ id: f.id, name: f.bodyName || `Body ${state.count + 1}`, shape: tool });
@@ -738,6 +740,47 @@ export function createKernel(r) {
         const tool = place(primitive(f, n), f, n);
         rec.tool = { shape: tool, f };
         return { state: applyOp(state, tool, f), rec };
+      }
+
+      case 'board': {
+        const th = n(f.thickness ?? 1.6);
+        if (!(th > 0)) fail('Board thickness must be greater than 0.');
+        const ol = f.outline || { kind: 'rect', w: 60, h: 40 };
+        let drawing;
+        if (ol.kind === 'circle') {
+          if (!(n(ol.d) > 0)) fail('The board diameter must be greater than 0.');
+          drawing = r.drawCircle(n(ol.d) / 2).translate(n(ol.x ?? 0), n(ol.y ?? 0));
+        } else {
+          const pts = boardPolygon(f, n);
+          if (pts.length < 3) fail('The board outline needs at least three points.');
+          let pen = r.draw(pts[0]);
+          for (const p of pts.slice(1)) pen = pen.lineTo(p);
+          drawing = pen.close();
+        }
+        let shape = drawing.sketchOnPlane('XY').extrude(th);
+        for (const h of f.holes || []) {
+          const d = n(h.d);
+          if (d > 0) shape = shape.cut(r.makeCylinder(d / 2, th + 2).translate([n(h.x), n(h.y), -1]));
+        }
+        const bodies = state.bodies.slice();
+        bodies.push({ id: f.id, name: f.name || 'Board', shape: place(shape, f, n), kind: 'board', color: f.color || '#2f6b3a' });
+        for (const p of f.parts || []) {
+          if (p.off) continue;
+          const b = p.body || { w: 2, d: 2 };
+          const w = Math.max(0.2, n(b.w));
+          const d = Math.max(0.2, n(b.d));
+          const h = Math.max(0.2, n(p.h ?? 1));
+          const lift = n(p.lift ?? 0);
+          let s = p.shape === 'cylinder' ? r.makeCylinder(Math.max(w, d) / 2, h) : r.makeBaseBox(w, d, h);
+          const rot = n(p.rot ?? 0);
+          if (rot) s = s.rotate(rot, [0, 0, 0], [0, 0, 1]);
+          const c = bodyCenter({ ...p, x: n(p.x ?? 0), y: n(p.y ?? 0), rot });
+          s = s.translate([c[0], c[1], p.side === 'bottom' ? -lift - h : th + lift]);
+          bodies.push({ id: `${f.id}.${p.ref}`, name: p.value ? `${p.ref} (${p.value})` : p.ref, shape: place(s, f, n), kind: 'part', ref: p.ref, board: f.id, color: p.color || '#3a3d44' });
+        }
+        const on = (f.parts || []).filter((p) => !p.off).length;
+        rec.note = `${on} of ${(f.parts || []).length} parts on the board${(f.nets || []).length ? `, ${f.nets.length} nets` : ''}. Open the placement editor to arrange them.`;
+        return { state: { ...state, bodies, count: state.count + 1 }, rec };
       }
 
       case 'import': {
@@ -1083,6 +1126,7 @@ export function createKernel(r) {
         max: t.max,
         volume: m.volume,
         ...(m.isMesh ? { isMesh: true, triangles: m.triangles, ...(m.isReference ? { isReference: true } : {}) } : {}),
+        ...(b.kind ? { kind: b.kind, color: b.color, ...(b.ref ? { ref: b.ref, board: b.board } : {}) } : {}),
       };
       transfer.push(out.positions.buffer, out.normals.buffer, out.indices.buffer, out.lines.buffer);
       return out;
@@ -1115,14 +1159,20 @@ export function createKernel(r) {
   }
 
   // ---------- export ----------
-  function pickBodies(ids) {
-    const list = ids && ids.length ? lastBodies.filter((b) => ids.includes(b.id)) : lastBodies;
+  // Without a list, STL export takes the printable bodies: boards and their parts are not printed.
+  function pickBodies(ids, { printable = false } = {}) {
+    let list = ids && ids.length ? lastBodies.filter((b) => ids.includes(b.id) || ids.includes(b.name)) : lastBodies;
+    if (!(ids && ids.length) && printable) {
+      const keep = list.filter((b) => !b.kind);
+      if (!keep.length && list.length) throw new Error('Only a circuit board and its parts are here, and those are not printed. Model the enclosure first, or name the board to export it anyway.');
+      list = keep;
+    }
     if (!list.length) throw new Error('There is nothing to export yet.');
     return list;
   }
 
   function exportSTL(ids, quality = 'standard') {
-    const meshes = pickBodies(ids).map((b) => (isRaw(b.shape) ? { vertices: b.shape.positions, triangles: b.shape.indices } : isMesh(b.shape) ? meshTriangles(b.shape) : b.shape.mesh(QUALITY[quality] || QUALITY.standard)));
+    const meshes = pickBodies(ids, { printable: true }).map((b) => (isRaw(b.shape) ? { vertices: b.shape.positions, triangles: b.shape.indices } : isMesh(b.shape) ? meshTriangles(b.shape) : b.shape.mesh(QUALITY[quality] || QUALITY.standard)));
     const count = meshes.reduce((s, m) => s + m.triangles.length / 3, 0);
     const buf = new ArrayBuffer(84 + count * 50);
     const dv = new DataView(buf);
@@ -1279,5 +1329,42 @@ export function createKernel(r) {
     return { total: els.length, items };
   }
 
-  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements };
+  // Boards and their parts against the rest of the model (an enclosure): what collides, and what
+  // comes closer than `clearance`. Each part is tested as its own body.
+  function interference({ board = null, clearance = 0.5 } = {}) {
+    const parts = lastState.bodies.filter((b) => b.kind && (!board || b.board === board || b.id === board));
+    const others = lastState.bodies.filter((b) => !b.kind && !isRaw(b.shape));
+    const out = [];
+    const rnd = (v) => Math.round(v * 1000) / 1000;
+    for (const p of parts) {
+      const tp = topo(p.shape);
+      const grown = { min: tp.min.map((v) => v - clearance), max: tp.max.map((v) => v + clearance) };
+      for (const o of others) {
+        if (!boxesTouch(topo(o.shape), grown)) continue;
+        let vol = 0;
+        try {
+          const x = boolean(p.shape, o.shape, 'intersect');
+          if (!isEmpty(x)) vol = isMesh(x) ? meshDisplay(x).volume : r.measureVolume(x);
+        } catch {
+          /* a failed boolean is not a collision we can report */
+        }
+        const who = { part: p.ref || p.name, body: o.name, bodyId: o.id };
+        if (vol > 1e-3) {
+          out.push({ ...who, kind: 'collides', volume: rnd(vol) });
+          continue;
+        }
+        if (clearance > 0 && !isMesh(p.shape) && !isMesh(o.shape)) {
+          try {
+            const d = r.measureDistanceBetween(p.shape, o.shape);
+            if (d < clearance) out.push({ ...who, kind: 'close', distance: rnd(d) });
+          } catch {
+            /* no distance for this pair */
+          }
+        }
+      }
+    }
+    return { parts: parts.length, bodies: others.length, issues: out };
+  }
+
+  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference };
 }

@@ -38,7 +38,7 @@ const state = {
 const MAX_IMAGES = 6;
 const MAX_TEXT = 200 * 1024; // per file
 const MAX_TEXT_TOTAL = 500 * 1024;
-const MODEL_FILE = /\.(stl|step|stp|obj|3mf|zip)$/i;
+const MODEL_FILE = /\.(stl|step|stp|obj|3mf|zip|sch|brd)$/i;
 const IMAGE_TYPES = /^image\/(png|jpeg|webp|gif)$/;
 
 // ---------- attachments ----------
@@ -110,13 +110,16 @@ export async function attachFiles(files) {
   if (models.length) {
     const extra = [];
     const ids = await act.importFiles(models, { others: extra });
-    if (ids.length) state.attachments.push({ kind: 'part', name: models.map((f) => f.name).join(', '), ids, files: ids.map((id) => `${featureById(id)?.fileName || 'a file'} (Import feature ${id})`) });
+    if (ids.length) state.attachments.push({ kind: 'part', name: models.map((f) => f.name).join(', '), ids, files: ids.map((id) => {
+          const f = featureById(id);
+          return f?.type === 'board' ? `${f.source || 'a board'} (board feature ${id}: ${(f.parts || []).length} parts, ${(f.nets || []).length} nets; lay it out with place_parts)` : `${f?.fileName || 'a file'} (Import feature ${id})`;
+        }) });
     for (const e of extra) {
       const why = attachText(e.name, e.bytes);
       if (why) unread.push(why);
     }
   }
-  if (unread.length) act.app.toast(`Could not attach ${unread.join(', ')}. The chat reads images and text files; Caliper imports STL, STEP, OBJ and 3MF.`, 'error');
+  if (unread.length) act.app.toast(`Could not attach ${unread.join(', ')}. The chat reads images and text files; Caliper imports STL, STEP, OBJ, 3MF and Eagle .sch / .brd.`, 'error');
   renderAttachments();
   if (state.attachments.length) $('chat-input').focus();
   return true;

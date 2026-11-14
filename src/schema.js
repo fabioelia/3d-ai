@@ -243,6 +243,14 @@ export const FEATURES = {
       opField,
     ],
   },
+  board: {
+    label: 'Board',
+    fields: [
+      { key: 'thickness', label: 'Thickness', type: 'expr', unit: 'mm', def: 1.6 },
+      { key: 'at', label: 'Position', type: 'vec3', def: [0, 0, 0], hint: 'where the board origin sits; its underside is at z' },
+      { key: 'rot', label: 'Rotation', type: 'vec3', def: [0, 0, 0], unit: '°', hint: 'degrees about x, y, z' },
+    ],
+  },
   move: {
     label: 'Move',
     fields: [

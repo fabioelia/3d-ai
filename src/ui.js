@@ -3,6 +3,10 @@ import { store, on, emit, update, select, featureById, undo, redo, setMode } fro
 import { evalExpr, fmt } from './expr.js';
 import { FEATURES, SHAPES, EDGE_PRESETS, FACE_PRESETS, MAKES_TOOL, featureLabel } from './schema.js';
 import * as act from './actions.js';
+import { checkBoard, airwires, flipPart } from './board/geometry.js';
+import { eagleScript } from './board/script.js';
+import { GRIDS } from './board/editor.js';
+import { saveFile, safeName } from './export.js';
 
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
@@ -58,13 +62,20 @@ export const ICON = {
   close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
   warn: svg('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>'),
   file: svg('<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>'),
+  board: svg('<rect x="3" y="5" width="18" height="14" rx="1.5"/><rect x="6.500" y="8.500" width="5" height="5"/><path d="M14 9h4M14 12h4M7 16.500h10"/><circle cx="5.500" cy="7.500" r=".6"/>'),
+  hole: svg('<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.500"/>'),
+  rotate: svg('<path d="M20 12a8 8 0 11-2.300-5.600"/><path d="M20 4v5h-5"/>'),
+  flip: svg('<path d="M12 3v18" stroke-dasharray="2 3"/><path d="M8 8l-4 4 4 4M16 8l4 4-4 4"/>'),
+  off: svg('<rect x="9" y="9" width="11" height="11" rx="1"/><path d="M4 4l6 6M4 9V4h5"/>'),
+  arrange: svg('<rect x="3.500" y="3.500" width="8" height="6"/><rect x="13.500" y="3.500" width="7" height="6"/><rect x="3.500" y="12.500" width="5" height="8"/><rect x="10.500" y="12.500" width="10" height="8"/>'),
   download: svg('<path d="M12 4v11M7.500 10.500L12 15l4.500-4.500M5 20h14"/>'),
 };
 
 const TOOLBAR = [
   [
     ['sketch', 'Sketch', 'Draw a 2D profile on a plane or a flat face'],
-    ['import', 'Import', 'Bring in an STL file (or drop one onto the view)'],
+    ['import', 'Import', 'Bring in a 3D file, or an Eagle / Fusion Electronics .sch or .brd (or drop one onto the view)'],
+    ['board', 'Board', 'Lay out a circuit board: place the parts of an Eagle schematic and see them in 3D'],
   ],
   [
     ['box', 'Box', 'Add a box'],
@@ -291,12 +302,14 @@ function renderTimeline() {
         tabindex: '0',
         onclick: () => {
           if (store.mode.kind === 'sketch' && store.mode.id !== f.id) act.finishSketch();
+          if (store.mode.kind === 'board' && store.mode.id !== f.id) act.leaveMode();
           select({ feature: f.id, shape: null });
         },
-        ondblclick: () => f.type === 'sketch' && act.editSketch(f.id),
+        ondblclick: () => (f.type === 'sketch' ? act.editSketch(f.id) : f.type === 'board' ? act.editBoard(f.id) : null),
         onkeydown: (e) => {
           if (e.key === 'Enter') {
             if (f.type === 'sketch') act.editSketch(f.id);
+            else if (f.type === 'board') act.editBoard(f.id);
             else select({ feature: f.id, shape: null });
           }
         },
@@ -443,6 +456,196 @@ function fieldRows(obj, fields, setter, idp) {
   return fields.filter((fd) => !fd.showIf || fd.showIf(obj)).map((fd) => (fd.type === 'bool' ? h('label', { class: 'row check' }, fieldControl(obj, fd, (v) => setter(fd.key, v), idp), h('span', {}, fd.label)) : row(fd.label, fieldControl(obj, fd, (v) => setter(fd.key, v), idp), fd.hint)));
 }
 
+// ---------- boards ----------
+const OUTLINES = [
+  ['rect', 'Rectangle'],
+  ['circle', 'Circle'],
+  ['path', 'Custom outline (from the file)'],
+];
+
+function boardRows(f, setter) {
+  const { mode, sel } = store;
+  const editing = mode.kind === 'board' && mode.id === f.id;
+  const ref = editing ? sel.shape : null;
+  const part = ref && !String(ref).startsWith('hole:') ? (f.parts || []).find((p) => p.ref === ref) : null;
+  const holeAt = ref && String(ref).startsWith('hole:') ? Number(String(ref).slice(5)) : -1;
+  const hole = holeAt >= 0 ? f.holes?.[holeAt] : null;
+  const n = (v) => {
+    try {
+      return evalExpr(v ?? 0, scope());
+    } catch {
+      return 0;
+    }
+  };
+  const editIn = (fn, key) =>
+    update(
+      (doc) => {
+        const x = doc.features.find((y) => y.id === f.id);
+        if (x) fn(x);
+      },
+      { key },
+    );
+  const out = [];
+  out.push(h('div', { class: 'insp-actions' }, h('button', { class: 'btn primary', type: 'button', onclick: () => (editing ? act.leaveMode() : act.editBoard(f.id)) }, editing ? 'Done placing' : 'Place parts')));
+
+  if (part) {
+    const pset = (key, v) =>
+      editIn((x) => {
+        const p = x.parts.find((q) => q.ref === part.ref);
+        if (!p) return;
+        if (v === undefined) delete p[key];
+        else p[key] = v;
+      }, `${f.id}.${part.ref}.${key}`);
+    const bset = (key, v) =>
+      editIn((x) => {
+        const p = x.parts.find((q) => q.ref === part.ref);
+        if (p) p.body = { ...p.body, [key]: v === undefined ? 1 : v };
+      }, `${f.id}.${part.ref}.body.${key}`);
+    const body = part.body || {};
+    out.push(
+      h('h3', { class: 'insp-sub' }, `${part.ref}`, h('span', { class: 'insp-sub-note' }, [part.value, part.package].filter(Boolean).join(' · '))),
+      row('X', exprInput({ id: 'part-x', label: 'X', unit: 'mm', get: () => part.x, set: (v) => pset('x', v ?? 0) })),
+      row('Y', exprInput({ id: 'part-y', label: 'Y', unit: 'mm', get: () => part.y, set: (v) => pset('y', v ?? 0) })),
+      row('Rotation', exprInput({ id: 'part-rot', label: 'Rotation', unit: '°', get: () => part.rot ?? 0, set: (v) => pset('rot', v ?? 0) })),
+      row('Side', selectInput({ id: 'part-side', label: 'Side', options: [['top', 'Top'], ['bottom', 'Bottom']], get: () => part.side || 'top', set: (v) => (part.side || 'top') !== v && editIn((x) => flipPart(x.parts.find((q) => q.ref === part.ref)), null) })),
+      row('Height', exprInput({ id: 'part-h', label: 'Height', unit: 'mm', get: () => part.h, set: (v) => pset('h', v) }), 'from the board surface, or from the lift'),
+      row('Lift', exprInput({ id: 'part-lift', label: 'Lift', unit: 'mm', def: 0, get: () => part.lift, set: (v) => pset('lift', v || undefined) }), 'gap under the part, about 8.5 on pin headers'),
+      row('Body width', exprInput({ id: 'part-w', label: 'Body width', unit: 'mm', get: () => body.w, set: (v) => bset('w', v) })),
+      row('Body depth', exprInput({ id: 'part-d', label: 'Body depth', unit: 'mm', get: () => body.d, set: (v) => bset('d', v) })),
+      row('Shape', selectInput({ id: 'part-shape', label: 'Shape', options: [['box', 'Box'], ['cylinder', 'Cylinder']], get: () => part.shape || 'box', set: (v) => pset('shape', v) })),
+    );
+    const on = h('input', { type: 'checkbox', id: 'part-on', onchange: () => (on.checked ? pset('off', undefined) : act.app.board?.takeOff()) });
+    on.checked = !part.off;
+    out.push(h('label', { class: 'row check' }, on, h('span', {}, 'On the board')));
+    const nets = (f.nets || []).filter((net) => (net.pads || []).some(([r]) => r === part.ref)).map((net) => net.name);
+    if (nets.length) out.push(h('p', { class: 'insp-note' }, `Connects to ${nets.join(', ')}.`));
+  } else if (hole) {
+    const hset = (key, v) =>
+      editIn((x) => {
+        if (x.holes?.[holeAt]) x.holes[holeAt][key] = v ?? 0;
+      }, `${f.id}.hole${holeAt}.${key}`);
+    out.push(
+      h('h3', { class: 'insp-sub' }, `Hole ${holeAt + 1}`),
+      row('X', exprInput({ id: 'hole-x', label: 'X', unit: 'mm', get: () => hole.x, set: (v) => hset('x', v) })),
+      row('Y', exprInput({ id: 'hole-y', label: 'Y', unit: 'mm', get: () => hole.y, set: (v) => hset('y', v) })),
+      row('Diameter', exprInput({ id: 'hole-d', label: 'Diameter', unit: 'mm', get: () => hole.d, set: (v) => hset('d', v) }), '3.2 for M3 screws'),
+      h('div', { class: 'insp-actions' }, h('button', { class: 'btn small danger', type: 'button', onclick: () => act.app.board?.takeOff() }, 'Delete hole')),
+    );
+  } else {
+    const ol = f.outline || { kind: 'rect', w: 60, h: 40 };
+    const oset = (key, v) =>
+      editIn((x) => {
+        x.outline = { ...(x.outline || { kind: 'rect', w: 60, h: 40 }) };
+        if (v === undefined) delete x.outline[key];
+        else x.outline[key] = v;
+      }, `${f.id}.outline.${key}`);
+    const kind = selectInput({
+      id: 'board-outline',
+      label: 'Outline',
+      options: ol.kind === 'path' ? OUTLINES : OUTLINES.slice(0, 2),
+      get: () => ol.kind,
+      set: (v) =>
+        editIn((x) => {
+          const cur = x.outline || {};
+          const pts = cur.kind === 'path' ? cur.pts.map((p) => [n(p[0]), n(p[1])]) : null;
+          const span = pts ? [Math.max(...pts.map((p) => p[0])) - Math.min(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[1])) - Math.min(...pts.map((p) => p[1]))] : null;
+          const big = Math.max(n(cur.w || 0), n(cur.h || 0), n(cur.d || 0), ...(span || [0])) || 50;
+          const c = pts ? [(Math.max(...pts.map((p) => p[0])) + Math.min(...pts.map((p) => p[0]))) / 2, (Math.max(...pts.map((p) => p[1])) + Math.min(...pts.map((p) => p[1]))) / 2] : [cur.x ?? 0, cur.y ?? 0];
+          x.outline = v === 'circle' ? { kind: 'circle', d: big, x: c[0], y: c[1] } : { kind: 'rect', w: span ? span[0] : n(cur.d) || big, h: span ? span[1] : n(cur.d) || big * 0.75, r: 2, x: c[0], y: c[1] };
+        }, null),
+    });
+    out.push(h('h3', { class: 'insp-sub' }, 'Board'), row('Outline', kind));
+    if (ol.kind === 'circle') out.push(row('Diameter', exprInput({ id: 'board-d', label: 'Diameter', unit: 'mm', get: () => ol.d, set: (v) => oset('d', v) })));
+    if (ol.kind === 'rect') {
+      out.push(
+        row('Width', exprInput({ id: 'board-w', label: 'Width', unit: 'mm', get: () => ol.w, set: (v) => oset('w', v) })),
+        row('Height', exprInput({ id: 'board-h', label: 'Height', unit: 'mm', get: () => ol.h, set: (v) => oset('h', v) })),
+        row('Corner radius', exprInput({ id: 'board-r', label: 'Corner radius', unit: 'mm', def: 0, get: () => ol.r, set: (v) => oset('r', v) })),
+      );
+    }
+    out.push(...fieldRows(f, FEATURES.board.fields, setter, 'f'));
+    if (ol.kind === 'path') out.push(h('p', { class: 'insp-note' }, `Outline from ${f.source || 'the file'}, ${ol.pts.length} points. Switch to a rectangle or circle to size it here.`));
+  }
+
+  // Problems: refreshed in place as values change, so typing keeps its focus.
+  const list = h('ul', { class: 'board-issues', 'aria-live': 'polite' });
+  const fillIssues = () => {
+    const cur = featureById(f.id);
+    if (!cur) return;
+    const issues = checkBoard(cur, n);
+    const wires = airwires(cur);
+    const len = wires.filter((w) => !w.offBoard).reduce((sum, w) => sum + w.length, 0);
+    list.replaceChildren(
+      ...(issues.length ? issues : [{ kind: 'ok', refs: [], message: 'No clashes: every part is on the board, clear of the others, the edge and the holes.' }]).map((i) =>
+        h('li', { class: `bi-${i.kind}`, onclick: () => i.refs[0] && (act.editBoard(f.id), select({ shape: i.refs[0] })) }, i.message),
+      ),
+      h('li', { class: 'bi-info' }, `${(cur.nets || []).length} nets, ${wires.length} airwires, ${Math.round(len)} mm of connections to route.`),
+    );
+  };
+  refreshers.push(fillIssues);
+  fillIssues();
+  out.push(h('h3', { class: 'insp-sub' }, 'Placement check'), list);
+  const fit = h('ul', { class: 'board-issues' });
+  out.push(
+    h(
+      'div',
+      { class: 'insp-actions' },
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        title: 'Test every part against the other bodies (an enclosure) for collisions and tight gaps',
+        onclick: async () => {
+          fit.replaceChildren(h('li', { class: 'bi-info' }, 'Checking…'));
+          try {
+            const res = await act.app.kernel.interference({ board: f.id, clearance: 0.5 });
+            fit.replaceChildren(
+              ...(res.bodies ? (res.issues.length ? res.issues.map((i) => h('li', { class: i.kind === 'collides' ? 'bi-overlap' : 'bi-edge' }, i.kind === 'collides' ? `${i.part} runs into ${i.body} (${fmt(i.volume, 1)} mm³ overlap).` : `${i.part} is ${fmt(i.distance, 2)} mm from ${i.body}.`)) : [h('li', { class: 'bi-ok' }, `Fits: no part touches or comes within 0.5 mm of ${res.bodies === 1 ? 'the other body' : `the ${res.bodies} other bodies`}.`)]) : [h('li', { class: 'bi-info' }, 'There is nothing else in the model to check against yet. Import or model the enclosure.')]),
+            );
+          } catch (e) {
+            fit.replaceChildren(h('li', { class: 'bi-overlap' }, e.message));
+          }
+        },
+      }, 'Check fit in enclosure'),
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        title: 'A script that moves the parts to these places in the Eagle or Fusion Electronics board editor',
+        onclick: async () => {
+          const msg = await saveFile(`${safeName(featureLabel(f))}-placement.scr`, eagleScript(featureById(f.id), n, { name: featureLabel(f) }), 'text/plain');
+          if (msg) toast(`${msg}. Run it in the Eagle / Fusion Electronics board editor (File > Execute Script).`);
+        },
+      }, 'Export to Eagle (.scr)'),
+    ),
+    fit,
+  );
+
+  // Every part, to find one quickly.
+  const parts = f.parts || [];
+  if (parts.length)
+    out.push(
+      h('h3', { class: 'insp-sub' }, `Parts (${parts.filter((p) => !p.off).length} of ${parts.length} placed)`),
+      h(
+        'table',
+        { class: 'bodies board-parts' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Part'), h('th', {}, 'Side'), h('th', {}, 'Size (mm)'))),
+        h(
+          'tbody',
+          {},
+          parts.map((p) =>
+            h(
+              'tr',
+              { class: `${p.ref === ref ? 'sel' : ''}${p.off ? ' off' : ''}`, tabindex: '0', title: [p.value, p.package].filter(Boolean).join(' · '), onclick: () => (act.editBoard(f.id), select({ shape: p.ref })) },
+              h('td', {}, h('span', { class: 'swatch', style: `background:${p.color || '#3a3d44'}` }), p.ref),
+              h('td', {}, p.off ? 'off' : p.side || 'top'),
+              h('td', { class: 'num' }, `${fmt(n(p.body?.w), 1)} × ${fmt(n(p.body?.d), 1)} × ${fmt(n(p.h), 1)}`),
+            ),
+          ),
+        ),
+      ),
+    );
+  return out;
+}
+
 function inspectorSignature() {
   const { mode, sel } = store;
   const f = featureById(sel.feature);
@@ -452,7 +655,9 @@ function inspectorSignature() {
   const sels = f ? JSON.stringify([f.edges && (f.edges.pick ? f.edges.pick.length : f.edges), f.faces && (f.faces.pick ? f.faces.pick.length : f.faces), f.face && f.face.pick && f.face.pick.length]) : '';
   // With nothing selected the inspector shows each body's size and volume, so those count too.
   const sizes = f ? '' : (store.results?.bodies || []).map((b) => `${b.name}:${b.min.concat(b.max).map((v) => v.toFixed(2)).join(',')}:${Math.round(b.volume)}`).join(';');
-  return [sizes, store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
+  // Boards: which part or hole is selected and the shape of what it has, not the values being typed.
+  const brd = f?.type === 'board' ? JSON.stringify([f.outline?.kind, (f.holes || []).length, (f.parts || []).map((p) => `${p.ref}${p.off ? '-' : ''}${p.side === 'bottom' ? 'b' : ''}${p.shape}`).join(), mode.kind === 'board' && mode.id === f.id, sel.shape && (f.parts || []).find((p) => p.ref === sel.shape) ? Object.keys((f.parts || []).find((p) => p.ref === sel.shape)).sort().join() : '']) : '';
+  return [brd, sizes, store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
 }
 
 function renderInspector(force = false) {
@@ -519,8 +724,8 @@ function renderInspector(force = false) {
       h('div', { class: 'insp-head' }, h('span', { class: 'insp-ico', html: ICON[f.type] || ICON.box }), name, h('span', { class: 'insp-tag' }, def.label)),
       err ? h('div', { class: 'insp-error', role: 'alert' }, h('span', { html: ICON.warn }), h('span', {}, err)) : null,
       f.suppressed ? h('div', { class: 'insp-warn' }, 'Suppressed: this feature is skipped until you turn it back on.') : null,
-      !err && info[f.id]?.note ? h('p', { class: 'insp-note' }, info[f.id].note) : null,
-      ...fieldRows(f, def.fields, setter, 'f'),
+      !err && info[f.id]?.note && f.type !== 'board' ? h('p', { class: 'insp-note' }, info[f.id].note) : null,
+      ...(f.type === 'board' ? boardRows(f, setter) : fieldRows(f, def.fields, setter, 'f')),
     ];
     if (f.type === 'sketch') {
       const editing = mode.kind === 'sketch' && mode.id === f.id;
@@ -580,6 +785,39 @@ function renderModebar() {
       ),
       h('button', { class: 'btn primary', type: 'button', id: 'finish-sketch', onclick: () => act.finishSketch() }, 'Finish sketch'),
     ];
+  } else if (mode.kind === 'board') {
+    const f = featureById(mode.id);
+    const ed = act.app.board;
+    const tool = (id, label, tip) => h('button', { class: `tool${mode.tool === id ? ' active' : ''}`, type: 'button', title: tip, 'aria-pressed': String(mode.tool === id), onclick: () => act.setBoardTool(id) }, h('span', { class: 'tool-ico', html: ICON[id] }), h('span', { class: 'tool-label' }, label));
+    const cmd = (icon, label, tip, fn) => h('button', { class: 'tool', type: 'button', title: tip, onclick: fn }, h('span', { class: 'tool-ico', html: ICON[icon] }), h('span', { class: 'tool-label' }, label));
+    const arrange = h(
+      'select',
+      { class: 'in mb-select', 'aria-label': 'Arrange parts automatically', title: 'Arrange parts automatically', onchange: () => {
+        const v = arrange.value;
+        arrange.value = '';
+        if (v === 'rest') ed.arrange('rest', ['top', 'bottom']);
+        else if (v === 'top') ed.arrange('all', ['top']);
+        else if (v === 'both') ed.arrange('all', ['top', 'bottom']);
+      } },
+      h('option', { value: '' }, 'Arrange…'),
+      h('option', { value: 'rest' }, 'Place the rest'),
+      h('option', { value: 'top' }, 'Rearrange all, top side'),
+      h('option', { value: 'both' }, 'Rearrange all, both sides'),
+    );
+    const grid = h('select', { class: 'in mb-select', 'aria-label': 'Snap grid', title: 'Snap grid (hold Alt while dragging to place freely)', onchange: () => ed.setGrid(Number(grid.value)) }, GRIDS.map((g) => h('option', { value: String(g) }, `${g} mm`)));
+    grid.value = String(ed.grid);
+    const below = h('input', { type: 'checkbox', id: 'board-below', onchange: () => ed.setFlip(below.checked) });
+    below.checked = ed.flip;
+    kids = [
+      h('span', { class: 'mb-title' }, featureLabel(f || { type: 'board' })),
+      h('div', { class: 'mb-tools', role: 'toolbar', 'aria-label': 'Board tools' }, tool('select', 'Select', 'Select and drag parts (V)'), tool('hole', 'Hole', 'Click to add mounting holes (H)')),
+      h('div', { class: 'mb-tools' }, cmd('rotate', 'Rotate', 'Turn the selected part 90° (R, Shift+R the other way)', () => ed.rotate(90)), cmd('flip', 'Flip', 'Move the selected part to the other side of the board (F)', () => ed.flipSide()), cmd('off', 'Off board', 'Take the selected part off the board (Delete)', () => ed.takeOff()), cmd('plus', 'Block', 'Add a block for a part that is not in the schematic', () => act.addBoardPart(mode.id))),
+      arrange,
+      grid,
+      h('label', { class: 'mb-check', for: 'board-below' }, below, 'From below'),
+      h('button', { class: 'btn small', type: 'button', onclick: () => ed.fit() }, 'Fit'),
+      h('button', { class: 'btn primary', type: 'button', id: 'board-done', onclick: () => act.leaveMode() }, 'Done'),
+    ];
   } else if (mode.kind === 'plane') {
     kids = [
       h('span', { class: 'mb-title' }, 'Where do you want to sketch?'),
@@ -612,7 +850,9 @@ function renderModebar() {
   bar.replaceChildren(...(kids || []).filter(Boolean));
   const hint = $('hint');
   hint.textContent =
-    mode.kind === 'sketch'
+    mode.kind === 'board'
+      ? 'Drag parts to place them; R turns, F flips, Delete takes one off, arrows nudge. Scroll zooms, drag empty space to pan. Alt: no snap.'
+      : mode.kind === 'sketch'
       ? 'Drag to draw. Right-drag orbits, middle-drag pans. Hold Alt to turn off snapping. Esc cancels.'
       : mode.kind === 'pick'
         ? 'Click to add or remove. Later features are hidden while you pick.'

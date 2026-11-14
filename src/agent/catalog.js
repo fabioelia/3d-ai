@@ -7,6 +7,28 @@ const selector = {
 };
 const vec3 = { type: 'array', items: { type: ['number', 'string'] }, minItems: 3, maxItems: 3 };
 const VIEWS = ['current', 'iso', 'top', 'bottom', 'front', 'back', 'right', 'left'];
+const PART_CHANGE = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string', description: 'Part reference, e.g. "U4".' },
+    x: { type: ['number', 'string'], description: 'Package origin X on the board (mm; Eagle coordinates).' },
+    y: { type: ['number', 'string'] },
+    center: { ...vec3, minItems: 2, maxItems: 2, description: 'Put the centre of the body here instead of setting x/y.' },
+    rot: { type: ['number', 'string'], description: 'Absolute rotation in degrees (counter-clockwise seen from the top).' },
+    turn: { type: 'number', description: 'Turn by this many degrees about the body centre.' },
+    side: { type: 'string', enum: ['top', 'bottom'], description: 'Flipping keeps the body where it is.' },
+    off: { type: 'boolean', description: 'true takes the part off the board (it waits beside it); false puts it back.' },
+    h: { type: ['number', 'string'], description: 'Body height in mm.' },
+    lift: { type: ['number', 'string'], description: 'Gap under the body (about 8.5 for a module on pin headers).' },
+    body: { type: 'object', properties: { w: { type: 'number' }, d: { type: 'number' }, cx: { type: 'number' }, cy: { type: 'number' } }, description: 'Body size and centre in package coordinates.' },
+    shape: { type: 'string', enum: ['box', 'cylinder'] },
+    value: { type: 'string' },
+    color: { type: 'string' },
+    add: { type: 'boolean', description: 'Create the part as a plain block if it does not exist.' },
+    remove: { type: 'boolean' },
+  },
+  required: ['ref'],
+};
 
 export const TOOLS = [
   {
@@ -35,7 +57,9 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        view: { type: 'string', enum: [...VIEWS, 'all'], default: 'current' },
+        view: { type: 'string', enum: [...VIEWS, 'all', 'board'], default: 'current', description: '"board" is the 2D placement view of a circuit board (what the person sees in the placement editor).' },
+        board: { type: 'string', description: 'With view "board": which board feature (default: the open or only one).' },
+        from_below: { type: 'boolean', description: 'With view "board": look from the bottom side.' },
         labels: { type: 'string', enum: ['none', 'faces', 'edges', 'all'], default: 'none' },
         highlight: { ...selector, description: `Faces or edges to highlight in orange in this image only. ${selector.description}` },
         size: { type: 'string', enum: ['small', 'medium', 'large'], default: 'medium', description: 'small 640x480, medium 1024x768, large 1600x1200' },
@@ -120,13 +144,13 @@ export const TOOLS = [
   },
   {
     name: 'import_file',
-    title: 'Import a 3D file',
+    title: 'Import a 3D file or a circuit board',
     description:
-      'Bring a 3D file from the local disk into the model as Import features: STL, STEP/STP, OBJ or 3MF, or a .zip of them (as model sites deliver). STEP files with real surfaces come in as exact solids. Meshes (STL, OBJ, 3MF, and STEP files that only hold a mesh, as Fusion\'s tessellated export does) are repaired, then small clean ones become exact solids whose flat faces can be sketched on, filleted and shelled, larger ones mesh bodies (moved, joined, cut, patterned), and ones that still are not closed reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
+      'Bring a file from the local disk into the model. Eagle / Fusion Electronics schematics (.sch) and boards (.brd) become a board feature: every part with its footprint, pads, body size and an estimated height, the nets (shown as airwires), and for a .brd the outline, holes and placement; a schematic gets its parts arranged on a board drawn to fit. 3D files become Import features: STL, STEP/STP, OBJ or 3MF, or a .zip of them (as model sites deliver). STEP files with real surfaces come in as exact solids. Meshes (STL, OBJ, 3MF, and STEP files that only hold a mesh, as Fusion\'s tessellated export does) are repaired, then small clean ones become exact solids whose flat faces can be sketched on, filleted and shelled, larger ones mesh bodies (moved, joined, cut, patterned), and ones that still are not closed reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Path to the .stl, .step, .stp, .obj, .3mf or .zip file on this computer.' },
+        path: { type: 'string', description: 'Path to the .stl, .step, .stp, .obj, .3mf, .sch, .brd or .zip file on this computer.' },
         name: { type: 'string', description: 'Name for the part in the timeline (single file only).' },
         mode: { type: 'string', enum: ['auto', 'solid', 'mesh'], default: 'auto' },
         units: { type: 'string', enum: ['mm', 'cm', 'm', 'in'], default: 'mm' },
@@ -170,11 +194,11 @@ export const TOOLS = [
     name: 'ui_action',
     title: 'Operate the interface',
     description:
-      'Do what the person could do with the mouse: open a sketch for editing (edit_sketch + feature) so they can draw in it, finish_sketch, exit_mode (leave sketching or picking), focus_feature (open a feature in the inspector), show_panel (timeline, inspector or assistant, on small screens), undo / redo (steps).',
+      'Do what the person could do with the mouse: open a sketch for editing (edit_sketch + feature) so they can draw in it, finish_sketch, edit_board (open the placement editor for a board feature), exit_mode (leave sketching, picking or the placement editor), focus_feature (open a feature in the inspector), show_panel (timeline, inspector or assistant, on small screens), undo / redo (steps).',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['edit_sketch', 'finish_sketch', 'exit_mode', 'focus_feature', 'show_panel', 'undo', 'redo'] },
+        action: { type: 'string', enum: ['edit_sketch', 'finish_sketch', 'edit_board', 'exit_mode', 'focus_feature', 'show_panel', 'undo', 'redo'] },
         feature: { type: 'string' },
         panel: { type: 'string', enum: ['timeline', 'inspector', 'assistant'] },
         steps: { type: 'integer', default: 1 },
@@ -211,17 +235,58 @@ export const TOOLS = [
     name: 'export_file',
     title: 'Export a file',
     description:
-      'Export the model: STL (binary, millimetres; quality draft/standard/fine), STEP (exact solids; mesh bodies are left out) or the Caliper project (.caliper.json, with imported files embedded). Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
+      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), or eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor. Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
     inputSchema: {
       type: 'object',
       properties: {
-        format: { type: 'string', enum: ['stl', 'step', 'project'] },
+        format: { type: 'string', enum: ['stl', 'step', 'project', 'eagle_script'] },
+        board: { type: 'string', description: 'With eagle_script: which board (default: the open or only one).' },
         path: { type: 'string' },
         quality: { type: 'string', enum: ['draft', 'standard', 'fine'], default: 'standard' },
         bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids to include (default: all).' },
       },
       required: ['format'],
     },
+  },
+  {
+    name: 'place_parts',
+    title: 'Place parts on a circuit board',
+    description:
+      'Lay out a board feature (from an Eagle .sch/.brd or written by hand): move, turn, flip (top/bottom), lift, resize or take parts off the board; set the outline (rect {w,h,r}, circle {d}, or path {pts}), thickness, holes and where the board sits in 3D (at, rot); or let Caliper arrange parts automatically (arrange "all", "rest" or a list of refs; sides ["top"] or ["top","bottom"]). Parts that would hang off the board wait beside it with off: true. Coordinates are the board\'s own millimetres seen from the top (Eagle coordinates); a bottom part is mirrored. Returns the placement problems (overlaps, edge, holes, unplaced) and the airwire length to route.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        board: { type: 'string', description: 'Board feature id (default: the open or only one).' },
+        parts: { type: 'array', items: PART_CHANGE },
+        arrange: { description: '"all", "rest" (the parts not on the board) or a list of refs to place automatically, biggest first.', anyOf: [{ type: 'string', enum: ['all', 'rest'] }, { type: 'array', items: { type: 'string' } }] },
+        sides: { type: 'array', items: { type: 'string', enum: ['top', 'bottom'] }, description: 'Sides to fill when arranging, in order (default ["top"]).' },
+        gap: { type: 'number', default: 1, description: 'Space between parts when arranging (mm).' },
+        margin: { type: 'number', default: 1, description: 'Space from the board edge when arranging (mm).' },
+        outline: { type: 'object', description: '{"kind":"rect","w":60,"h":40,"r":2} or {"kind":"circle","d":58} or {"kind":"path","pts":[[x,y],…]}; x/y shift rect and circle.' },
+        thickness: { type: ['number', 'string'] },
+        holes: { type: 'array', items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, d: { type: 'number' } } }, description: 'Replaces all mounting holes.' },
+        at: { ...vec3, description: 'Where the board origin sits in the model; its underside is at z.' },
+        rot: { ...vec3, description: 'Board rotation in degrees about x, y, z (e.g. [90,0,0] stands it upright).' },
+      },
+    },
+  },
+  {
+    name: 'check_board',
+    title: 'Check a board layout',
+    description:
+      'Placement check for a board: parts that collide (same side, footprints overlap and heights overlap), hang off the edge or come too close to it, sit over mounting holes, or are not on the board; then a 3D check of every part and the board against the other bodies (the enclosure): collisions with overlap volume and anything closer than `clearance`. Also the longest nets by airwire length and every part with its position, side and size.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        board: { type: 'string' },
+        clearance: { type: 'number', default: 0.5, description: 'Report parts closer than this to the enclosure (mm).' },
+        edge_clearance: { type: 'number', default: 0.5 },
+        hole_clearance: { type: 'number', default: 0.5 },
+        enclosure: { type: 'boolean', default: true, description: 'false skips the 3D check.' },
+        parts: { type: 'boolean', default: true, description: 'false leaves out the part list.' },
+      },
+    },
+    annotations: { readOnlyHint: true },
   },
   {
     name: 'get_guide',

@@ -1399,3 +1399,140 @@ body.dropping .stage::after {
     display: none;
   }
 }
+
+/* ---------- board placement editor ---------- */
+.board-editor {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  outline: none;
+  touch-action: none;
+  user-select: none;
+  /* A PCB editor reads best dark, as in Eagle and Fusion, in either theme. */
+  --bd-bg: #0f1419;
+  --bd-grid: rgba(255, 255, 255, 0.05);
+  --bd-grid-major: rgba(255, 255, 255, 0.12);
+  --bd-pcb: #1d4d2e;
+  --bd-pcb-edge: #79c290;
+  --bd-pad: #d6ad55;
+  --bd-air: #ead870;
+  --bd-sel: #ffb347;
+  --bd-bad: #ff5a52;
+  --bd-text: #f3f6f8;
+  --bd-part-edge: rgba(255, 255, 255, 0.5);
+  --bd-hole: #0b0f13;
+  background: var(--bd-bg);
+}
+.board-editor[hidden] {
+  display: none;
+}
+.be-svg,
+.be-svg svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+.be-chip {
+  position: absolute;
+  left: 10px;
+  bottom: 38px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #dfe6ec;
+  font-size: 12px;
+  pointer-events: none;
+}
+.be-chip .bad {
+  color: #ff8a80;
+  font-weight: 600;
+}
+.stage:has(.board-editor:not([hidden])) .views {
+  display: none;
+}
+.mb-select {
+  width: auto;
+  min-width: 76px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.mb-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.insp-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.insp-sub-note {
+  font-weight: 400;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.board-issues li {
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: var(--panel);
+  border-left: 3px solid var(--line);
+  cursor: default;
+}
+.board-issues li.bi-overlap,
+.board-issues li.bi-outside,
+.board-issues li.bi-hole {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+  cursor: pointer;
+}
+.board-issues li.bi-edge,
+.board-issues li.bi-unplaced {
+  border-left-color: var(--brass);
+  background: var(--brass-soft);
+  cursor: pointer;
+}
+.board-issues li.bi-ok {
+  border-left-color: var(--ok);
+}
+.board-issues li.bi-info {
+  color: var(--muted);
+}
+.board-parts tr {
+  cursor: pointer;
+}
+.board-parts tr:hover td {
+  background: var(--panel);
+}
+.board-parts tr.sel td {
+  background: var(--brass-soft);
+}
+.board-parts tr.off td {
+  color: var(--muted);
+}
+.swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: baseline;
+}

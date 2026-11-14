@@ -103,8 +103,8 @@ export class Viewport {
     this.readTheme();
     this.buildGrid();
     for (const b of this.bodies) {
-      b.mesh.material.color.copy(this.colors.body);
-      b.lineObj.material.color.copy(this.colors.edge);
+      b.mesh.material.color.copy(b.color ? new THREE.Color(b.color) : this.colors.body);
+      b.lineObj.material.color.copy(b.color ? this.colors.edge.clone().lerp(new THREE.Color(b.color), 0.35) : this.colors.edge);
     }
     this.refreshHighlights();
     this.handlers.theme?.();
@@ -204,7 +204,8 @@ export class Viewport {
       g.setIndex(new THREE.BufferAttribute(b.indices, 1));
       const mesh = new THREE.Mesh(
         g,
-        new THREE.MeshStandardMaterial({ color: this.colors.body, roughness: 0.62, metalness: 0.08, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
+        // Boards and their parts keep their own colours (green board, blue modules, black headers).
+        new THREE.MeshStandardMaterial({ color: b.color ? new THREE.Color(b.color) : this.colors.body, roughness: b.color ? 0.5 : 0.62, metalness: 0.08, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
       );
       // Seams (where a round face closes on itself) are not drawn or pickable.
       let shown = [];
@@ -212,7 +213,7 @@ export class Viewport {
       else for (const g of b.edgeGroups) if (!b.edges[g.i]?.seam && !b.edges[g.i]?.soft) for (let k = g.start * 3; k < (g.start + g.count) * 3; k++) shown.push(b.lines[k]);
       const lg = new THREE.BufferGeometry();
       lg.setAttribute('position', new THREE.Float32BufferAttribute(shown, 3));
-      const lineObj = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: this.colors.edge }));
+      const lineObj = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: b.color ? this.colors.edge.clone().lerp(new THREE.Color(b.color), 0.35) : this.colors.edge }));
       this.bodyGroup.add(mesh, lineObj);
       return { ...b, mesh, lineObj };
     });

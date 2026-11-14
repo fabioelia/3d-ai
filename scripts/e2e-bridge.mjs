@@ -130,6 +130,31 @@ r = await A.call('export_file', { format: 'project' });
 const proj = path.join(work, 'caliper-exports', 'Clip.caliper.json');
 ok(fs.existsSync(proj) && Object.keys(JSON.parse(fs.readFileSync(proj, 'utf8')).files || {}).length === 1, 'project export embeds the imported STL');
 
+// Circuit boards: import an Eagle board, lay it out, check it against an enclosure, look at it.
+fs.copyFileSync(new URL('./fixtures/demo.brd', import.meta.url), path.join(work, 'demo.brd'));
+r = await A.call('import_file', { path: 'demo.brd' });
+st = json(r);
+ok(!r.isError && st.ok && st.bodies.some((b) => /circuit board/.test(b.kind)) && st.bodies.filter((b) => /board part/.test(b.kind)).length === 4, `import_file brings in an Eagle board: ${textOf(r).slice(0, 160)}`);
+const boardId = st.added?.[0];
+r = await A.call('place_parts', { board: boardId, parts: [{ ref: 'U1', lift: 8.5 }, { ref: 'Q1', center: [12, 30] }], holes: [{ x: 4, y: 4, d: 3.2 }, { x: 46, y: 4, d: 3.2 }, { x: 4, y: 36, d: 3.2 }] });
+st = json(r);
+ok(!r.isError && st.summary.placed === 4 && st.summary.holes.length === 3 && st.summary.problems.some((m) => /hole/.test(m)), `place_parts moves parts and reports problems: ${JSON.stringify(st.summary.problems)}`);
+r = await A.call('place_parts', { board: boardId, arrange: 'all', sides: ['top', 'bottom'] });
+st = json(r);
+ok(st.arranged?.placed === 4 && st.summary.problems.length === 0, `place_parts arranges automatically: ${JSON.stringify(st.arranged)}`);
+r = await A.call('check_board', { board: boardId });
+st = json(r);
+ok(!r.isError && st.parts.length === 4 && st.enclosure && st.longest_nets.length === 3, `check_board reports placement, enclosure and nets: ${textOf(r).slice(0, 160)}`);
+r = await A.call('screenshot', { view: 'board', board: boardId, size: 'small' });
+const boardImg = r.content.find((c) => c.type === 'image');
+ok(boardImg && boardImg.data.length > 5000 && /airwires/.test(textOf({ content: r.content.filter((c) => c.type === 'text') })), 'screenshot shows the board placement view');
+if (boardImg) fs.writeFileSync(path.join(shots, 'bridge-board.png'), Buffer.from(boardImg.data, 'base64'));
+r = await A.call('export_file', { format: 'eagle_script', board: boardId, path: 'out/demo.scr' });
+ok(!r.isError && /MOVE U1/.test(fs.readFileSync(path.join(work, 'out/demo.scr'), 'utf8')), 'export_file writes an Eagle placement script');
+r = await A.call('export_file', { format: 'stl', path: 'out/clip2.stl' });
+ok(!r.isError && fs.statSync(path.join(work, 'out/clip2.stl')).size === fs.statSync(outFile).size, 'STL export leaves the board and its parts out');
+await A.call('edit_model', { remove: [boardId] });
+
 // Ask the person; they answer in the page.
 const asking = A.call('ask_user', { question: 'Which edge should be rounded?', expect: 'selection', timeout_seconds: 60 });
 await page.waitForSelector('#ask:not([hidden])', { timeout: 10000 });

@@ -102,6 +102,10 @@ export class Kernel {
     return this.call('list', { kind, sel, limit });
   }
 
+  interference(opts) {
+    return this.call('interference', { opts });
+  }
+
   measure(a, b) {
     return this.call('measure', { a, b });
   }

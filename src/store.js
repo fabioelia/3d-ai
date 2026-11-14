@@ -148,6 +148,31 @@ export function logActivity(by, text, { merge = null } = {}) {
 }
 
 const fname = (f) => `${f.name || f.type} (${f.id})`;
+// What happened to a board's parts, in words: "moved U4 to (12, -3), flipped C1 to the bottom".
+function describeParts(a, b) {
+  const old = new Map(a.map((p) => [p.ref, p]));
+  const out = [];
+  for (const p of b) {
+    const o = old.get(p.ref);
+    if (!o) {
+      out.push(`added ${p.ref}`);
+      continue;
+    }
+    if (JSON.stringify(o) === JSON.stringify(p)) continue;
+    const bits = [];
+    if (!!o.off !== !!p.off) bits.push(p.off ? `took ${p.ref} off the board` : `put ${p.ref} on the board at (${p.x}, ${p.y})`);
+    else if (o.x !== p.x || o.y !== p.y) bits.push(`moved ${p.ref} to (${p.x}, ${p.y})`);
+    if ((o.side || 'top') !== (p.side || 'top')) bits.push(`flipped ${p.ref} to the ${p.side || 'top'}`);
+    if ((o.rot || 0) !== (p.rot || 0)) bits.push(`turned ${p.ref} to ${p.rot || 0}°`);
+    const other = Object.keys({ ...o, ...p }).filter((k) => !['x', 'y', 'off', 'side', 'rot'].includes(k) && JSON.stringify(o[k]) !== JSON.stringify(p[k]));
+    if (other.length) bits.push(`set ${p.ref} ${other.map((k) => (typeof p[k] === 'object' ? k : `${k} = ${p[k]}`)).join(', ')}`);
+    out.push(...bits);
+  }
+  for (const r of old.keys()) if (!b.some((p) => p.ref === r)) out.push(`removed ${r}`);
+  if (out.length > 6) return `${out.slice(0, 5).join(', ')} and ${out.length - 5} more part changes`;
+  return out.join(', ') || 'changed parts';
+}
+
 export function describeChange(a, b) {
   const out = [];
   if (a.name !== b.name) out.push(`renamed the part to "${b.name}"`);
@@ -170,6 +195,7 @@ export function describeChange(a, b) {
     const keys = [...new Set([...Object.keys(old), ...Object.keys(f)])].filter((k) => JSON.stringify(old[k]) !== JSON.stringify(f[k]));
     if (keys.length === 1 && keys[0] === 'suppressed') out.push(`${f.suppressed ? 'suppressed' : 'unsuppressed'} ${fname(f)}`);
     else if (keys.includes('shapes')) out.push(`edited the shapes in ${fname(f)}`);
+    else if (f.type === 'board' && keys.length === 1 && keys[0] === 'parts') out.push(`${describeParts(old.parts || [], f.parts || [])} on ${fname(f)}`);
     else
       out.push(
         `changed ${fname(f)}: ${keys
@@ -267,12 +293,16 @@ export function setMode(mode, { by = 'user' } = {}) {
     const text =
       mode.kind === 'sketch'
         ? `opened sketch ${fname(f(mode.id) || { id: mode.id, type: 'sketch' })} for editing`
-        : mode.kind === 'plane'
+        : mode.kind === 'board'
+          ? `opened the placement editor for ${fname(f(mode.id) || { id: mode.id, type: 'board' })}`
+          : mode.kind === 'plane'
           ? 'started a sketch and is choosing its plane'
           : mode.kind === 'pick'
             ? `is picking ${mode.pick}s for ${fname(f(mode.feature) || { id: mode.feature, type: 'feature' })}`
             : prev.kind === 'sketch'
               ? 'finished the sketch'
+              : prev.kind === 'board'
+                ? 'closed the placement editor'
               : prev.kind === 'pick'
                 ? 'finished picking'
                 : 'returned to modelling';

@@ -50,6 +50,8 @@ self.onmessage = async ({ data }) => {
       result = kernel.listElements(data.kind, data.sel, data.limit);
     } else if (type === 'measure') {
       result = kernel.measure(data.a, data.b);
+    } else if (type === 'interference') {
+      result = kernel.interference(data.opts);
     } else if (type === 'stl') {
       result = kernel.exportSTL(data.bodies, data.quality);
       transfer.push(result.buffer);

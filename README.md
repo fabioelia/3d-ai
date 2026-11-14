@@ -11,6 +11,7 @@ A browser CAD tool for 3D-printable parts, in the spirit of Fusion's sketch → 
 - **Agents over MCP.** Claude Code, Claude Desktop, Cursor or any MCP client gets the whole app as tools: the full state, screenshots of what you see, exact geometry and measurements, printability checks, every edit, your selection, your camera, import and export. See [Use it with an AI agent](#use-it-with-an-ai-agent-mcp).
 - **Chat in Caliper.** Type in the side panel; your message goes over MCP to Claude Code on your computer, which works on the model with the same tools and replies there. No API key: it uses your Claude login. Drop, paste or attach images (photos, sketches), 3D files and documents (notes, CSV, schematics such as Eagle `.sch`): images and text go to Claude with your message, 3D files go into the model.
 - **3D import.** STL, STEP/STP, OBJ and 3MF, or the zip a model site or a colleague sent. STEP with real surfaces comes in as exact solids; meshes (including Fusion's mesh-only "tessellated" STEP) are repaired automatically (zero-area slivers, T-junctions, duplicate faces, near-miss vertices). Small clean meshes become exact solids whose flat faces you can sketch on, fillet and shell; larger ones become mesh bodies you can move, cut, join and pattern; files that still are not closed solids come in as reference meshes you can view, move, measure and export. Other files in a zip go to the chat when you drop it there.
+- **Circuit boards.** Like Fusion's board editor, minus the copper routing: import an Eagle / Fusion Electronics schematic (`.sch`) or board (`.brd`) and every part comes in with its footprint, pads, body size, an estimated height and the nets. A top-down placement editor lets you drag, turn (R), flip to the bottom (F) and nudge parts on a grid, add mounting holes, shape the outline (rectangle, circle, or the board file's own), and arrange parts automatically on one or both sides. Airwires show what connects to what, and clashes (overlapping parts, parts over the edge or a hole) turn red as you drag. The board and each part are real 3D bodies, so you can model the enclosure around them and check the fit (collisions and tight gaps); STL export leaves the electronics out, STEP keeps them, and the placement goes back to Eagle or Fusion as a `.scr` script.
 - **Export.** Binary STL (three mesh qualities) and STEP. Projects save as JSON, with imported STLs embedded, and autosave in the browser.
 
 ## Use it with an AI agent (MCP)
@@ -59,7 +60,8 @@ What an agent gets:
 | `query_geometry`, `measure` | Every face, edge and body with type, size, position, radius; exact distances and angles. |
 | `check_printability` | Overhangs (with the faces responsible), bed contact, floating or separate bodies, fit in a build volume. |
 | `set_model`, `edit_model` | Build or change the parametric timeline. One call is one undo step. |
-| `import_file`, `export_file` | Read a 3D file (STL, STEP, OBJ, 3MF or a zip) from disk into the model; write STL, STEP or the project to disk. |
+| `import_file`, `export_file` | Read a 3D file (STL, STEP, OBJ, 3MF or a zip) or an Eagle `.sch` / `.brd` from disk into the model; write STL, STEP, the project or an Eagle placement script to disk. |
+| `place_parts`, `check_board` | Lay out a circuit board (move, turn, flip, lift, resize parts; outline, holes, auto-arrange) and check it: clashes, edge and hole clearance, collisions with the enclosure, airwire lengths. `screenshot` with view `board` shows the placement. |
 | `select`, `set_view`, `ui_action` | Point at things in your view, move your camera, open sketches, undo and redo. |
 | `ask_user`, `show_message` | Ask you to click the faces or edges it should use (or confirm, or type an answer), and tell you things in Caliper. |
 
@@ -108,6 +110,7 @@ The build uses relative URLs, so it works under `/3d-ai/` or any other path with
 | Repeat | Select a feature in the timeline → **Pattern** (rows or around an axis) or **Mirror**. |
 | Change anything later | Click the feature in the timeline and edit its numbers. Double-click a sketch to reopen it. |
 | Drive sizes from one place | Add a parameter (left panel) and type its name into any field. |
+| Lay out a circuit board | **Board**, or import / drop an Eagle `.sch` or `.brd`. Drag parts in the placement editor; R turns, F flips to the bottom, Delete takes a part off the board, arrows nudge, H adds holes; **Arrange** places them for you. Set the outline, thickness and where the board sits in the inspector, model the enclosure around it, then **Check fit in enclosure**. **Export to Eagle (.scr)** moves the parts there. |
 | Bring in a 3D file | **Import**, File → Import 3D file, or drop files on the window: STL, STEP/STP, OBJ, 3MF, or a zip of them. A zip imports every 3D file in it; several parts keep the layout they share (or are set out in a row if they would overlap). The inspector says how each part came in and what was repaired, and lets you set units, scale, placement and solid or mesh. Drop a zip on the chat instead to also hand its other files (notes, schematics) to Claude. |
 
 Mouse: drag orbits, right-drag pans, scroll zooms. While sketching, drag draws and right-drag orbits. Keys: `S` sketch, `E` extrude, `F` fillet, `Esc` back out, `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo; in a sketch `R` `C` `P` `O` `L` `T` `V` pick the tools.
@@ -130,15 +133,16 @@ Mouse: drag orbits, right-drag pans, scroll zooms. While sketching, drag draws a
 | `bridge/server.mjs` | The MCP server (stdio and Streamable HTTP), the local web server and WebSocket hub, file import/export on disk. |
 | `src/assistant.js`, `guide.js` | The side-panel chat (relayed to Claude Code through the bridge), and the briefing every agent gets (the document format and how to work). |
 | `src/export.js` | Saving files (direct download, or zipped through the artifact save prompt). |
+| `src/board/` | Circuit boards: Eagle `.sch` / `.brd` reader (`eagle.js`, `xml.js`), placement geometry, checks, airwires and auto-arrange (`geometry.js`), the 2D placement editor (`editor.js`) and the Eagle script export (`script.js`). |
 
 Picked faces and edges are stored with their position in the body *and* a geometric signature. When an earlier dimension changes, the kernel re-finds them and refreshes the signature, so a fillet follows its edge as the part grows. If the edge truly disappears, the feature reports that instead of silently filleting something else.
 
 ## Tests
 
 ```bash
-npm test                 # kernel and STL import: documents checked against hand-computed volumes and bounds
+npm test                 # kernel, 3D import and boards: documents checked against hand-computed volumes and bounds
 npm run bundle && node scripts/make-artifact.mjs && npm run preview &
-npm run test:e2e         # headless Chromium: modelling flows, import, exports
+npm run test:e2e         # headless Chromium: modelling flows, import, exports, the board placement editor
 npm run test:bridge      # real MCP clients (stdio and HTTP) driving a real browser tab through the bridge
 ```
 
@@ -151,6 +155,7 @@ The end-to-end scripts need Playwright with Chromium available to `require('play
 - No lofts, sweeps, threads or drafts yet, and no assemblies. Units are millimetres.
 - Text uses one font (DejaVu Sans Bold) and shows as a placeholder box until extruded.
 - Imported meshes: curved areas of exact-solid imports stay faceted; mesh bodies have no selectable faces or edges, cannot be filleted, chamfered or shelled, and are left out of STEP files. Combining a mesh body with a solid gives a mesh body. Only verifiably closed meshes become solids; anything else (faces folded through each other, internal faces, holes the repair cannot close) is kept as a reference mesh, which never takes part in cuts or joins. Its volume is shown as approximate. IGES is not supported (the bundled OpenCascade build has no IGES reader); STEP assemblies come in as one body per file.
+- Boards: no copper routing, design rules or 3D models of real parts; parts are boxes and cylinders sized from their footprints, with heights taken from the package description (e.g. "29x17.3x4.3") or estimated from the package type. Eagle and Fusion Electronics XML files only (no KiCad yet).
 - Safari may refuse the hosted page's connection to the local bridge; use the page the bridge serves (`http://127.0.0.1:7429/`) or another browser.
 
 OpenCascade is LGPL-2.1; replicad, three.js and the MCP SDK are MIT; Manifold is Apache-2.0; DejaVu fonts are under the Bitstream Vera licence.
