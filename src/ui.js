@@ -554,7 +554,7 @@ function renderInspector(force = false) {
           h(
             'tbody',
             {},
-            bodies.map((b) => h('tr', {}, h('td', {}, b.name), h('td', { class: 'num' }, b.max.map((v, i) => fmt(v - b.min[i], 1)).join(' × ')), h('td', { class: 'num' }, `${fmt(b.volume / 1000, 2)} cm³`))),
+            bodies.map((b) => h('tr', {}, h('td', {}, b.name), h('td', { class: 'num' }, b.max.map((v, i) => fmt(v - b.min[i], 1)).join(' × ')), h('td', { class: 'num', title: b.isReference ? 'Approximate: this reference mesh is not a closed solid' : null }, `${b.isReference ? '≈ ' : ''}${fmt(b.volume / 1000, 2)} cm³`))),
           ),
         )
       : h('p', { class: 'insp-note' }, 'No solids yet.'),

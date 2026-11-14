@@ -114,6 +114,35 @@ const ok = (c, m) => { console.log(`${c ? 'PASS' : 'FAIL'} ${m}`); if (!c) faile
   ok(imp.type === 'import' && s.bodies === before2 + 1 && !imp.err, `STL import adds a body (${imp.note || imp.err})`);
   await p.screenshot({ path: `${dir}/e2e-import.png` });
 
+  // --- a zip of two STLs (as model sites deliver them): both import, set out side by side, one undo
+  const zlib = require('zlib');
+  const zipOf = (files) => {
+    const parts = []; const central = []; let off = 0;
+    for (const [name, data] of files) {
+      const body = zlib.deflateRawSync(data); const n = Buffer.from(name);
+      const h = Buffer.alloc(30); h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(8, 8); h.writeUInt32LE(body.length, 18); h.writeUInt32LE(data.length, 22); h.writeUInt16LE(n.length, 26);
+      parts.push(h, n, body);
+      const c = Buffer.alloc(46); c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(8, 10); c.writeUInt32LE(body.length, 20); c.writeUInt32LE(data.length, 24); c.writeUInt16LE(n.length, 28); c.writeUInt32LE(off, 42);
+      central.push(c, n); off += 30 + n.length + body.length;
+    }
+    const cd = Buffer.concat(central); const e = Buffer.alloc(22);
+    e.writeUInt32LE(0x06054b50, 0); e.writeUInt16LE(files.length, 8); e.writeUInt16LE(files.length, 10); e.writeUInt32LE(cd.length, 12); e.writeUInt32LE(off, 16);
+    return Buffer.concat([...parts, cd, e]);
+  };
+  const beforeZip = (await state()).bodies;
+  const undoDepth = await p.evaluate(() => window.caliper.store.undoStack.length);
+  await p.setInputFiles('#import-file', { name: 'thing.zip', mimeType: 'application/zip', buffer: zipOf([['files/part_a.stl', buf], ['files/part_b.stl', buf], ['images/x.png', Buffer.alloc(10)]]) });
+  await p.waitForFunction((n) => window.caliper.store.results?.bodies.length === n + 2, beforeZip, { timeout: 60000 }).catch(() => {});
+  await settle();
+  const zipInfo = await p.evaluate(() => {
+    const s = window.caliper.store; const f = s.doc.features.slice(-2);
+    const b = f.map((x) => s.results.bodies.find((y) => y.id === x.id));
+    return { names: f.map((x) => x.name), apart: b[0] && b[1] && (b[0].max[0] <= b[1].min[0] + 1e-6 || b[1].max[0] <= b[0].min[0] + 1e-6), onBed: b.every((y) => y && Math.abs(y.min[2]) < 1e-6), undo: s.undoStack.length };
+  });
+  ok(zipInfo.names.join() === 'part_a,part_b' && zipInfo.apart && zipInfo.onBed && zipInfo.undo === undoDepth + 1, `zip import: ${JSON.stringify(zipInfo)}`);
+  await p.click('#undo'); await settle();
+  ok((await state()).bodies === beforeZip, 'one undo removes the whole zip import');
+
   const [dl2] = await Promise.all([p.waitForEvent('download', { timeout: 20000 }), (async () => { await p.click('#file-btn'); await p.click('[data-file="step"]'); })()]);
   ok(dl2.suggestedFilename().endsWith('.step'), 'STEP downloads');
 

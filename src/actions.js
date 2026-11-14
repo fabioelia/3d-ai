@@ -172,32 +172,94 @@ export function viewportClick(pick, evt) {
 }
 
 // ---------- importing ----------
-// Brings STL files in as Import features; returns the new feature ids.
-export async function importFiles(fileList, { by = 'user', props = {} } = {}) {
+// Brings STL files (or zips of them) in as Import features; returns the new feature ids. `items` are
+// File objects or { name, bytes }. Several parts keep the layout they share in their files (centred
+// on the bed as a group) unless they would overlap, in which case they are set out in a row.
+export async function importFiles(items, { by = 'user', props = {} } = {}) {
   const { putFile } = await import('./files.js');
-  const added = [];
-  for (const file of fileList) {
-    if (!/\.stl$/i.test(file.name)) {
-      app.toast(`${file.name} is not an STL file. Caliper imports .stl files.`, 'error');
+  const { isZip, readZip, stlEntry, inflateRawWeb } = await import('./zip.js');
+  const parts = [];
+  for (const item of items) {
+    const name = item.name || 'model.stl';
+    // Files are Blobs (which have their own bytes() method these days); plain { name, bytes } items
+    // come from agents.
+    const isBlob = typeof Blob !== 'undefined' && item instanceof Blob;
+    const size = isBlob ? item.size : item.bytes?.length || 0;
+    if (size > 200 * 1024 * 1024) {
+      app.toast(`${name} is larger than 200 MB.`, 'error');
       continue;
     }
-    if (file.size > 200 * 1024 * 1024) {
-      app.toast(`${file.name} is larger than 200 MB.`, 'error');
-      continue;
-    }
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const id = await putFile(file.name, bytes);
-    if (store.mode.kind !== 'model') leaveMode();
-    const name = file.name.replace(/\.stl$/i, '');
-    const f = addFeature('import', { name, fileName: file.name, file: id, op: 'new', ...props }, { by });
-    added.push(f.id);
+    const bytes = isBlob ? new Uint8Array(await item.arrayBuffer()) : item.bytes;
+    if (/\.zip$/i.test(name) || isZip(bytes)) {
+      try {
+        const found = await readZip(bytes, inflateRawWeb, { accept: stlEntry });
+        if (!found.length) app.toast(`${name} has no STL files inside.`, 'error');
+        parts.push(...found);
+      } catch (e) {
+        app.toast(`${name}: ${e.message}`, 'error');
+      }
+    } else if (/\.stl$/i.test(name)) parts.push({ name, bytes });
+    else app.toast(`${name} is not an STL or zip file. Caliper imports .stl files, or .zip files that contain them.`, 'error');
   }
-  if (added.length) {
-    const res = await app.rebuildNow();
-    app.viewport.fit();
-    const errs = added.map((id) => res?.features?.[id]?.error).filter(Boolean);
-    if (errs.length) app.toast(errs[0], 'error');
-    else app.toast(res?.features?.[added[added.length - 1]]?.note || 'Imported.');
+  if (!parts.length) return [];
+  if (store.mode.kind !== 'model') leaveMode();
+  const many = parts.length > 1;
+  const key = `import:${Date.now()}`;
+  const ids = [];
+  for (const part of parts) ids.push(await putFile(part.name, part.bytes));
+  const added = [];
+  update(
+    (doc) => {
+      parts.forEach((part, i) => {
+        const id = newFeatureId('import');
+        doc.features.push({ id, type: 'import', name: part.name.replace(/\.stl$/i, ''), fileName: part.name, file: ids[i], op: 'new', ...(many ? { align: 'original' } : {}), ...props });
+        added.push(id);
+      });
+    },
+    { by, key },
+  );
+  let res = await app.rebuildNow();
+  if (many && res) {
+    // Lay the parts out: keep their shared layout if nothing overlaps, otherwise set them in a row.
+    const boxes = added.map((id) => res.bodies.find((b) => b.id === id)).filter(Boolean);
+    const overlap = (a, b) => [0, 1, 2].reduce((v, k) => v * Math.max(0, Math.min(a.max[k], b.max[k]) - Math.max(a.min[k], b.min[k])), 1);
+    const vol = (a) => [0, 1, 2].reduce((v, k) => v * Math.max(1e-9, a.max[k] - a.min[k]), 1);
+    let crowded = false;
+    for (let i = 0; i < boxes.length && !crowded; i++) for (let j = i + 1; j < boxes.length && !crowded; j++) if (overlap(boxes[i], boxes[j]) > 0.1 * Math.min(vol(boxes[i]), vol(boxes[j]))) crowded = true;
+    const at = new Map();
+    if (crowded) {
+      const gap = 5;
+      const width = boxes.reduce((w, b) => w + (b.max[0] - b.min[0]), 0) + gap * (boxes.length - 1);
+      let x = -width / 2;
+      for (const b of boxes) {
+        const w = b.max[0] - b.min[0];
+        at.set(b.id, { align: 'bed', at: [Math.round((x + w / 2) * 1000) / 1000, 0, 0] });
+        x += w + gap;
+      }
+    } else if (boxes.length) {
+      const lo = [0, 1, 2].map((k) => Math.min(...boxes.map((b) => b.min[k])));
+      const hi = [0, 1, 2].map((k) => Math.max(...boxes.map((b) => b.max[k])));
+      const shift = [-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]].map((v) => Math.round(v * 1000) / 1000);
+      for (const b of boxes) at.set(b.id, { align: 'original', at: shift });
+    }
+    update(
+      (doc) => {
+        for (const f of doc.features) if (at.has(f.id)) Object.assign(f, at.get(f.id));
+      },
+      { by, key, quiet: true }, // part of the same import, so one undo removes it all
+    );
+    res = await app.rebuildNow();
+  }
+  select({ feature: added[added.length - 1], shape: null }, { by });
+  app.viewport.fit();
+  const errs = added.map((id) => res?.features?.[id]?.error).filter(Boolean);
+  if (errs.length) app.toast(errs[0], 'error');
+  else if (!many) app.toast(res?.features?.[added[0]]?.note || 'Imported.');
+  else {
+    const notes = added.map((id) => res?.features?.[id]?.note || '');
+    const ref = notes.filter((n) => /reference mesh/.test(n)).length;
+    const fixed = notes.filter((n) => /Repaired/.test(n)).length;
+    app.toast(`Imported ${added.length} parts${fixed ? `, repaired ${fixed}` : ''}${ref ? `; ${ref} came in as reference meshes because they are not closed solids` : ''}. Click a part in the timeline for details.`);
   }
   return added;
 }

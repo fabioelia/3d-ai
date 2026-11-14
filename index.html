@@ -49,7 +49,7 @@
           <button type="button" data-file="new">New empty part</button>
           <button type="button" data-file="example">Open the example part</button>
           <hr>
-          <button type="button" data-file="import">Import STL…</button>
+          <button type="button" data-file="import">Import STL or zip…</button>
           <button type="button" data-file="open">Open project…</button>
           <button type="button" data-file="save">Save project (.json)</button>
           <hr>
@@ -153,7 +153,7 @@
   </nav>
 </div>
 <input type="file" id="open-file" accept=".json,application/json" hidden>
-<input type="file" id="import-file" accept=".stl,model/stl" multiple hidden>
+<input type="file" id="import-file" accept=".stl,.zip,model/stl,application/zip" multiple hidden>
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>

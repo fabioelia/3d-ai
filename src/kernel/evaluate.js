@@ -4,7 +4,7 @@
 import { evalExpr, resolveParams } from '../expr.js';
 import { BASE_PLANES, frameFromFace, offsetFrame, toWorld, v3, axisVec } from '../frame.js';
 import { pathPoints } from '../sketchgeo.js';
-import { parseSTL, stlToSolid, stlToMesh, meshDisplay, meshTriangles, SOLID_TRIANGLE_LIMIT } from './stl.js';
+import { parseSTL, repairMesh, weldMesh, closedVolume, describeRepairs, meshToSTL, stlToSolid, stlToMesh, meshDisplay, meshTriangles, RawMesh, rawDisplay, SOLID_TRIANGLE_LIMIT } from './stl.js';
 
 const TOL = 1e-4;
 const DISPLAY_MESH = { tolerance: 0.04, angularTolerance: 0.25 };
@@ -13,6 +13,8 @@ export const QUALITY = {
   standard: { tolerance: 0.02, angularTolerance: 0.2 },
   fine: { tolerance: 0.005, angularTolerance: 0.1 },
 };
+
+const RAW_BOOLEAN = 'A reference mesh (an imported STL that is not a closed solid) cannot be cut, joined or intersected. Use "New body" for it, or repair the file (for example in your slicer or Windows 3D Builder) and import it again.';
 
 const FAIL_HINT = {
   fillet: 'Fillet failed. The radius is probably too large for the selected edges.',
@@ -37,7 +39,8 @@ export function createKernel(r) {
   const topoCache = new WeakMap();
   const files = new Map(); // imported file id -> bytes
   const importCache = new Map(); // `${file}:${mode}` -> { shape, kind, triangles } or { error }
-  const isMesh = (s) => s instanceof r.MeshShape;
+  const isRaw = (s) => s instanceof RawMesh;
+  const isMesh = (s) => s instanceof r.MeshShape || isRaw(s);
 
   // Triangulation at display quality, shared by topology stats and the viewport mesh.
   function rawMesh(shape) {
@@ -363,6 +366,7 @@ export function createKernel(r) {
   // Transforms that work on both exact solids and mesh bodies. (replicad's own mesh rotate, scale
   // and offset mirror are unreliable, so mesh bodies go through Manifold's matrix transform.)
   function meshXf(s, R, t) {
+    if (isRaw(s)) return s.transform(R, t);
     const m = [R[0][0], R[1][0], R[2][0], 0, R[0][1], R[1][1], R[2][1], 0, R[0][2], R[1][2], R[2][2], 0, t[0], t[1], t[2], 1];
     return new r.MeshShape(s.wrapped.transform(m));
   }
@@ -389,6 +393,7 @@ export function createKernel(r) {
       return meshXf(s, R, v3.mul(nn, 2 * v3.dot(nn, origin)));
     },
     scale(s, k) {
+      if (isRaw(s)) return s.transform([[k, 0, 0], [0, k, 0], [0, 0, k]], [0, 0, 0]);
       return isMesh(s) ? new r.MeshShape(s.wrapped.scale(k)) : s.scale(k, [0, 0, 0]);
     },
   };
@@ -396,6 +401,7 @@ export function createKernel(r) {
   // Booleans between an exact solid and a mesh body run as mesh booleans (Manifold).
   const asMesh = (s) => (isMesh(s) ? s : s.meshShape({ tolerance: 0.01, angularTolerance: 0.15 }));
   function boolean(a, b, op) {
+    if (isRaw(a) || isRaw(b)) fail(RAW_BOOLEAN);
     if (isMesh(a) || isMesh(b)) {
       const A = asMesh(a);
       const B = asMesh(b);
@@ -526,13 +532,20 @@ export function createKernel(r) {
   function applyOp(state, tool, f, hintBody) {
     const op = f.op || (state.bodies.length ? 'join' : 'new');
     const bodies = state.bodies.slice();
+    if (isRaw(tool)) {
+      // A reference mesh never takes part in a boolean: it always stands as its own body.
+      if (op === 'cut' || op === 'intersect' || (op === 'join' && f.target !== undefined)) fail(RAW_BOOLEAN);
+      bodies.push({ id: f.id, name: f.bodyName || `Body ${state.count + 1}`, shape: tool });
+      return { ...state, bodies, count: state.count + 1 };
+    }
     const tb = { min: tool.boundingBox.bounds[0], max: tool.boundingBox.bounds[1] };
     const wanted = f.target !== undefined ? [].concat(f.target) : null;
     let targets = bodies.map((_, i) => i).filter((i) => (wanted ? wanted.includes(bodies[i].id) || wanted.includes(bodies[i].name) : true));
     if (wanted && !targets.length) fail(`No body named "${wanted.join(', ')}".`);
     if (!wanted) {
       if (hintBody !== undefined && op === 'join' && bodies[hintBody]) targets = [hintBody];
-      else targets = targets.filter((i) => boxesTouch(topo(bodies[i].shape), tb));
+      // Reference meshes never take part in booleans unless they are named as the target.
+      else targets = targets.filter((i) => !isRaw(bodies[i].shape) && boxesTouch(topo(bodies[i].shape), tb));
     }
     if (op === 'new' || (op === 'join' && !targets.length)) {
       bodies.push({ id: f.id, name: f.bodyName || `Body ${state.count + 1}`, shape: tool });
@@ -735,19 +748,58 @@ export function createKernel(r) {
         let imp = importCache.get(key);
         if (!imp) {
           try {
-            const parsed = parseSTL(bytes);
-            let shape = null;
-            let kind = 'mesh';
-            if (want === 'solid' || (want === 'auto' && parsed.triangles <= SOLID_TRIANGLE_LIMIT)) {
-              try {
-                shape = stlToSolid(r, bytes);
-                kind = 'solid';
-              } catch (e) {
-                if (want === 'solid') throw new Error(e.message === 'not watertight' ? 'This STL has gaps, so it cannot become an exact solid. Try "Mesh" mode.' : 'This STL could not be turned into an exact solid. Try "Mesh" mode.');
+            const raw = parseSTL(bytes);
+            // Strict first; then merge vertices a hair apart (0.01, then 0.05 mm), well below what a
+            // printer resolves, the way slicers tolerate sloppy exports.
+            const attempts = [0, 0.01, 0.05];
+            let lastError = null;
+            for (const weld of attempts) {
+              let parsed;
+              if (weld) {
+                const w = weldMesh(raw, weld);
+                parsed = repairMesh(w);
+                if (w.merged) {
+                  parsed.stats.welded = weld;
+                  parsed.stats.merged = w.merged;
+                }
+                parsed.changed = true;
+              } else parsed = repairMesh(raw);
+              let shape = null;
+              let kind = 'mesh';
+              let dropped = 0;
+              // Only a verifiably closed mesh becomes an exact solid, and the solid must enclose the same
+              // volume: OpenCascade will otherwise happily build a wrong solid from a broken mesh.
+              const closed = closedVolume(parsed);
+              if (closed !== null && closed > 0 && (want === 'solid' || (want === 'auto' && parsed.triangles <= SOLID_TRIANGLE_LIMIT))) {
+                try {
+                  const solid = stlToSolid(r, meshToSTL(parsed)); // welded, with proper normals (some files have none)
+                  if (Math.abs(r.measureVolume(solid) - closed) > 0.01 * closed + 1e-6) throw new Error('volume mismatch');
+                  shape = solid;
+                  kind = 'solid';
+                } catch (e) {
+                  lastError = e.message === 'not watertight' ? 'This STL has gaps, so it cannot become an exact solid. Try "Mesh" mode.' : 'This STL could not be turned into an exact solid. Try "Mesh" mode.';
+                }
               }
+              if (!shape && want !== 'solid') {
+                try {
+                  ({ shape, dropped } = stlToMesh(r, parsed));
+                } catch (e) {
+                  lastError = e.message;
+                }
+              }
+              // A strict pass that had to leave pieces out is worth one more try with welding.
+              if (shape && (!dropped || weld === attempts[attempts.length - 1])) {
+                imp = { shape, kind, triangles: parsed.triangles, repairs: describeRepairs(parsed.stats), dropped };
+                break;
+              }
+              if (shape && !imp) imp = { shape, kind, triangles: parsed.triangles, repairs: describeRepairs(parsed.stats), dropped };
             }
-            if (!shape) shape = stlToMesh(r, parsed);
-            imp = { shape, kind, triangles: parsed.triangles };
+            if (!imp && want !== 'solid') {
+              // Beyond repair: keep it as a reference mesh, exactly as it came in.
+              const kept = repairMesh(raw);
+              imp = { shape: new RawMesh(kept.positions, kept.indices), kind: 'reference', triangles: kept.triangles, repairs: '', dropped: 0, why: lastError };
+            }
+            if (!imp) throw new Error(lastError || 'This STL file could not be read.');
           } catch (e) {
             imp = { error: e.message || 'This STL file could not be read.' };
           }
@@ -772,10 +824,14 @@ export function createKernel(r) {
         if (at[0] || at[1] || at[2]) shape = shape.translate(at);
         const [lo, hi] = shape.boundingBox.bounds;
         const size = hi.map((v, i) => Math.round((v - lo[i]) * 100) / 100).join(' × ');
+        const fixes = [imp.repairs ? `Repaired the file: ${imp.repairs}.` : '', imp.dropped ? `Left out ${imp.dropped} piece${imp.dropped === 1 ? '' : 's'} that ${imp.dropped === 1 ? 'is' : 'are'} not closed.` : ''].filter(Boolean).join(' ');
         rec.note =
-          imp.kind === 'solid'
+          (fixes ? `${fixes} ` : '') +
+          (imp.kind === 'reference'
+            ? `Imported as a reference mesh (${imp.triangles.toLocaleString()} triangles), ${size} mm, because the file is not a closed solid (it has faces folded through each other or missing). It can be moved, rotated, scaled, patterned, measured and exported to STL as it is, but not cut or joined with other bodies.`
+            : imp.kind === 'solid'
             ? `Imported as an exact solid (${imp.triangles.toLocaleString()} triangles merged into ${topo(shape).faces.length.toLocaleString()} faces), ${size} mm. You can sketch on its flat faces, fillet, shell and cut it.`
-            : `Imported as a mesh body (${imp.triangles.toLocaleString()} triangles), ${size} mm. It can be moved, joined, cut and patterned, but not filleted, chamfered or shelled.`;
+            : `Imported as a mesh body (${imp.triangles.toLocaleString()} triangles), ${size} mm. It can be moved, joined, cut and patterned, but not filleted, chamfered or shelled.`);
         rec.tool = { shape, f };
         return { state: applyOp(state, shape, { ...f, op: f.op || 'new', bodyName: f.bodyName || f.name }), rec };
       }
@@ -860,7 +916,19 @@ export function createKernel(r) {
         if (!state.bodies.length) fail('There is nothing to mirror yet.');
         const bodies = state.bodies.map((b) => {
           if (f.body !== undefined && f.body !== b.id && f.body !== b.name) return b;
-          return { ...b, shape: boolean(b.shape, xf.mirror(b.shape.clone(), base.dir, origin), 'join') };
+          const mirrored = xf.mirror(b.shape.clone(), base.dir, origin);
+          if (isRaw(b.shape)) {
+            // No boolean for reference meshes: keep both halves as one triangle set.
+            const n = b.shape.positions.length / 3;
+            const pos = new Float32Array(b.shape.positions.length * 2);
+            pos.set(b.shape.positions);
+            pos.set(mirrored.positions, b.shape.positions.length);
+            const idx = new Uint32Array(b.shape.indices.length * 2);
+            idx.set(b.shape.indices);
+            idx.set(mirrored.indices.map((v) => v + n), b.shape.indices.length);
+            return { ...b, shape: new RawMesh(pos, idx) };
+          }
+          return { ...b, shape: boolean(b.shape, mirrored, 'join') };
         });
         return { state: { ...state, bodies }, rec };
       }
@@ -965,8 +1033,8 @@ export function createKernel(r) {
       const t = topo(b.shape);
       let m = meshCache.get(b.shape);
       if (!m && isMesh(b.shape)) {
-        const d = meshDisplay(b.shape);
-        m = { positions: d.positions, normals: d.normals, indices: d.indices, faceGroups: [], lines: d.lines, edgeGroups: [], volume: d.volume, isMesh: true, triangles: d.triangles };
+        const d = isRaw(b.shape) ? rawDisplay(b.shape) : meshDisplay(b.shape);
+        m = { positions: d.positions, normals: d.normals, indices: d.indices, faceGroups: [], lines: d.lines, edgeGroups: [], volume: d.volume, isMesh: true, triangles: d.triangles, ...(isRaw(b.shape) ? { isReference: true } : {}) };
         meshCache.set(b.shape, m);
       }
       if (!m) {
@@ -1005,7 +1073,7 @@ export function createKernel(r) {
         min: t.min,
         max: t.max,
         volume: m.volume,
-        ...(m.isMesh ? { isMesh: true, triangles: m.triangles } : {}),
+        ...(m.isMesh ? { isMesh: true, triangles: m.triangles, ...(m.isReference ? { isReference: true } : {}) } : {}),
       };
       transfer.push(out.positions.buffer, out.normals.buffer, out.indices.buffer, out.lines.buffer);
       return out;
@@ -1045,7 +1113,7 @@ export function createKernel(r) {
   }
 
   function exportSTL(ids, quality = 'standard') {
-    const meshes = pickBodies(ids).map((b) => (isMesh(b.shape) ? meshTriangles(b.shape) : b.shape.mesh(QUALITY[quality] || QUALITY.standard)));
+    const meshes = pickBodies(ids).map((b) => (isRaw(b.shape) ? { vertices: b.shape.positions, triangles: b.shape.indices } : isMesh(b.shape) ? meshTriangles(b.shape) : b.shape.mesh(QUALITY[quality] || QUALITY.standard)));
     const count = meshes.reduce((s, m) => s + m.triangles.length / 3, 0);
     const buf = new ArrayBuffer(84 + count * 50);
     const dv = new DataView(buf);
@@ -1140,9 +1208,12 @@ export function createKernel(r) {
   function describe(el) {
     if (el.kind === 'body') {
       const t = topo(el.body.shape);
-      const out = { ref: el.body.id, name: el.body.name, kind: isMesh(el.body.shape) ? 'mesh body' : 'solid body', min: r3(t.min), max: r3(t.max), size: r3(t.max.map((v, k) => v - t.min[k])) };
+      const out = { ref: el.body.id, name: el.body.name, kind: isRaw(el.body.shape) ? 'reference mesh (not a closed solid)' : isMesh(el.body.shape) ? 'mesh body' : 'solid body', min: r3(t.min), max: r3(t.max), size: r3(t.max.map((v, k) => v - t.min[k])) };
       try {
-        if (isMesh(el.body.shape)) {
+        if (isRaw(el.body.shape)) {
+          out.approximate_volume = Math.round(rawDisplay(el.body.shape).volume * 1000) / 1000;
+          out.triangles = el.body.shape.indices.length / 3;
+        } else if (isMesh(el.body.shape)) {
           out.volume = Math.round(el.body.shape.volume() * 1000) / 1000;
           out.surface_area = Math.round(el.body.shape.surfaceArea() * 1000) / 1000;
         } else {

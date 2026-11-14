@@ -1175,7 +1175,7 @@ input.in:not([type='password']):not(.insp-name):not(.p-name) {
 
 /* Dropping files onto the window */
 body.dropping .stage::after {
-  content: 'Drop STL files to import them';
+  content: 'Drop STL or zip files to import them';
   position: absolute;
   inset: 10px;
   display: flex;

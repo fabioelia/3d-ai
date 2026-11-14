@@ -494,7 +494,7 @@ function createMcpServer(getBackend, key) {
         if (!fs.existsSync(file)) return text(`There is no file at ${file}.`, true);
         const size = fs.statSync(file).size;
         if (size > 200 * 1024 * 1024) return text(`${file} is larger than 200 MB.`, true);
-        if (!/\.stl$/i.test(file)) return text(`${path.basename(file)} is not an .stl file.`, true);
+        if (!/\.(stl|zip)$/i.test(file)) return text(`${path.basename(file)} is not an .stl or .zip file.`, true);
         args.data = fs.readFileSync(file).toString('base64');
         args.fileName = path.basename(file);
         delete args.path;

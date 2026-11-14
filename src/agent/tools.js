@@ -51,11 +51,11 @@ export function buildReport(res = store.results) {
     bodies: res.bodies.map((b) => ({
       id: b.id,
       name: b.name,
-      kind: b.isMesh ? 'mesh' : 'solid',
+      kind: b.isReference ? 'reference mesh (not a closed solid; cannot be cut or joined)' : b.isMesh ? 'mesh' : 'solid',
       size_mm: b.max.map((v, i) => r2(v - b.min[i])),
       min: r3(b.min),
       max: r3(b.max),
-      volume_mm3: r2(b.volume),
+      ...(b.isReference ? { approximate_volume_mm3: r2(b.volume) } : { volume_mm3: r2(b.volume) }),
       ...(b.isMesh ? { triangles: b.triangles } : { faces: b.faces.length, edges: b.edges.filter((e) => !e.seam).length }),
     })),
     ...(res.bodies.length ? {} : { note: 'The model has no solid bodies.' }),
@@ -294,16 +294,14 @@ const IMPL = {
   async import_stl(args, ctx) {
     await ready();
     if (!args.data) return fail('import_stl reads files through the Caliper MCP bridge; it is not available here.');
-    const name = args.fileName || 'model.stl';
-    const bytes = fromB64(args.data);
-    const id = await putFile(name, bytes);
     toModelMode(ctx.by);
-    const props = { name: args.name || name.replace(/\.stl$/i, ''), fileName: name, file: id, op: args.op || 'new' };
-    for (const k of ['mode', 'units', 'scale', 'align', 'at', 'rot']) if (args[k] !== undefined) props[k] = args[k];
-    const f = act.addFeature('import', props, { by: ctx.by });
-    const report = await rebuildReport({ added: f.id });
-    act.app.viewport.fit();
-    return report;
+    const item = { name: args.fileName || 'model.stl', bytes: fromB64(args.data) };
+    const props = {};
+    for (const k of ['mode', 'units', 'scale', 'align', 'at', 'rot', 'op']) if (args[k] !== undefined) props[k] = args[k];
+    const added = await act.importFiles([item], { by: ctx.by, props });
+    if (!added.length) return fail(`${item.name} has no STL files Caliper could read.`);
+    if (added.length === 1 && args.name) update((doc) => (doc.features.find((f) => f.id === added[0]).name = String(args.name)), { by: ctx.by, quiet: true });
+    return rebuildReport({ added });
   },
 
   async select(args, ctx) {

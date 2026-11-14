@@ -86,7 +86,87 @@ ok(!errs(res).length && res.bodies[0].isMesh, `forcing mesh mode on a small file
 res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'junk' }] }).result;
 ok(/no triangles|cut short|could not/.test(res.features.i.error || ''), `junk file explained (${res.features.i.error})`);
 res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'open' }] }).result;
-ok(/watertight/.test(res.features.i.error || ''), `open mesh explained (${res.features.i.error})`);
+ok(!errs(res).length && res.bodies[0]?.isReference && /reference mesh/.test(res.features.i.note), `an open mesh comes in as a reference mesh (${res.features.i.note?.slice(0, 80)})`);
+
+// Defects seen in real downloads (SketchUp-style exports).
+const tri = (P, T) => {
+  const buf = new ArrayBuffer(84 + T.length * 50);
+  const dv = new DataView(buf);
+  dv.setUint32(80, T.length, true);
+  T.forEach((t, i) => t.forEach((v, c) => P[v].forEach((x, q) => dv.setFloat32(84 + i * 50 + 12 + c * 12 + q * 4, x, true))));
+  return new Uint8Array(buf);
+};
+const cubeP = [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0], [0, 0, 10], [10, 0, 10], [10, 10, 10], [0, 10, 10]];
+const cubeT = [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]];
+// A T-junction patched with a zero-area sliver: vertex 8 sits on edge 1-5, which the side face 1-2-6
+// still uses whole.
+const slivP = [...cubeP, [10, 0, 5]];
+const slivT = cubeT.filter((t) => t.join() !== '0,1,5').concat([[0, 1, 8], [0, 8, 5], [1, 5, 8]]);
+k.addFile('sliver', tri(slivP, slivT));
+res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'sliver' }] }).result;
+ok(!errs(res).length && !res.bodies[0].isMesh && near(res.volume, 1000, 0.01) && /zero-area/.test(res.features.i.note), `sliver and T-junction repaired into a solid (${res.features.i.note?.slice(0, 110)})`);
+// Two blocks stacked in one shell with the face between them left in (an internal face).
+const stackP = [...cubeP, [0, 0, 20], [10, 0, 20], [10, 10, 20], [0, 10, 20]];
+const stackT = [[0, 2, 1], [0, 3, 2], [8, 9, 10], [8, 10, 11], [4, 5, 6], [4, 6, 7],
+  [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7],
+  [4, 5, 9], [4, 9, 8], [5, 6, 10], [5, 10, 9], [6, 7, 11], [6, 11, 10], [7, 4, 8], [7, 8, 11]];
+k.addFile('stack', tri(stackP, stackT));
+res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'stack' }] }).result;
+ok(!errs(res).length && near(res.max[2] - res.min[2], 20) && res.bodies[0].isReference, `two blocks with the face between them left in come in as a reference mesh, never as a wrong solid (${res.bodies[0]?.isReference ? 'reference' : res.bodies[0]?.isMesh ? 'mesh' : 'solid'}, vol ${res.volume.toFixed(0)}; ${errs(res)})`);
+// Reference meshes (the open fixture cannot be closed).
+res = k.evaluate({ features: [
+  { id: 'i', type: 'import', file: 'open', at: [0, 0, 0] },
+  { id: 'b', type: 'box', w: 60, d: 30, h: 2 },
+  { id: 'm', type: 'mirror', plane: 'YZ', offset: 30 },
+  { id: 'p', type: 'pattern', features: ['i'], kind: 'linear', dir: 'x', count: 2, spacing: 45 },
+] }).result;
+ok(!errs(res).length && res.bodies.length === 3 && res.bodies.filter((b) => b.isReference).length === 2, `boxes next to a reference mesh do not try to merge with it; mirror and pattern work (${res.bodies.length} bodies; ${errs(res)})`);
+res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'open' }, { id: 'c', type: 'cylinder', d: 4, h: 30, op: 'cut', target: 'i' }] }).result;
+ok(/reference mesh/.test(res.features.c.error || ''), `cutting a reference mesh explains why not (${res.features.c.error?.slice(0, 70)})`);
+k.evaluate({ features: [{ id: 'i', type: 'import', file: 'open' }] });
+ok(k.exportSTL(null, 'standard').triangles === 10, 'a reference mesh exports exactly as it came in');
+ok(/reference mesh/.test(k.measure('i').a.kind), 'measure knows it is a reference mesh');
+
+// Zips, as model sites deliver them.
+const { readZip, stlEntry, isZip } = await import('../src/zip.js');
+const zlib = await import('node:zlib');
+const zipOf = (files) => {
+  const parts = [];
+  const central = [];
+  let off = 0;
+  for (const [name, data, deflate] of files) {
+    const body = deflate ? zlib.deflateRawSync(data) : Buffer.from(data);
+    const n = Buffer.from(name);
+    const h = Buffer.alloc(30);
+    h.writeUInt32LE(0x04034b50, 0);
+    h.writeUInt16LE(deflate ? 8 : 0, 8);
+    h.writeUInt32LE(body.length, 18);
+    h.writeUInt32LE(data.length, 22);
+    h.writeUInt16LE(n.length, 26);
+    parts.push(h, n, body);
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0);
+    c.writeUInt16LE(deflate ? 8 : 0, 10);
+    c.writeUInt32LE(body.length, 20);
+    c.writeUInt32LE(data.length, 24);
+    c.writeUInt16LE(n.length, 28);
+    c.writeUInt32LE(off, 42);
+    central.push(c, n);
+    off += 30 + n.length + body.length;
+  }
+  const cd = Buffer.concat(central);
+  const e = Buffer.alloc(22);
+  e.writeUInt32LE(0x06054b50, 0);
+  e.writeUInt16LE(files.length, 8);
+  e.writeUInt16LE(files.length, 10);
+  e.writeUInt32LE(cd.length, 12);
+  e.writeUInt32LE(off, 16);
+  return new Uint8Array(Buffer.concat([...parts, cd, e]));
+};
+const zip = zipOf([['files/a.stl', bracket, true], ['files/b.stl', tri(cubeP, cubeT), false], ['images/a.png', new Uint8Array(10), true], ['__MACOSX/files/._a.stl', new Uint8Array(5), false], ['README.txt', new TextEncoder().encode('hi'), true]]);
+const entries = await readZip(zip, async (d) => new Uint8Array(zlib.inflateRawSync(d)), { accept: stlEntry });
+ok(isZip(zip) && entries.map((e) => e.name).join() === 'a.stl,b.stl' && entries[0].bytes.length === bracket.length && entries[0].bytes.every((b, i) => b === bracket[i]), `zip: finds the STLs, skips images and metadata (${entries.map((e) => e.path)})`);
+export { zipOf };
 res = k.evaluate({ features: [{ id: 'i', type: 'import', file: 'missing', fileName: 'gone.stl' }] }).result;
 ok(/gone\.stl/.test(res.features.i.error || ''), 'missing file explained');
 

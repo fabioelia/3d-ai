@@ -122,12 +122,12 @@ export const TOOLS = [
     name: 'import_stl',
     title: 'Import an STL file',
     description:
-      'Bring an STL file from the local disk into the model as an Import feature. Small clean meshes (up to about 6,000 triangles) become exact solids whose flat faces can be sketched on, filleted and shelled; larger ones become mesh bodies that can be moved, joined, cut and patterned. Placed centred on the bed by default.',
+      'Bring an STL file (or a .zip of them, as model sites deliver) from the local disk into the model as Import features. Small clean meshes (up to about 6,000 triangles) become exact solids whose flat faces can be sketched on, filleted and shelled; larger ones become mesh bodies that can be moved, joined, cut and patterned; files that are not closed solids even after repair come in as reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Path to the .stl file on this computer.' },
-        name: { type: 'string' },
+        path: { type: 'string', description: 'Path to the .stl or .zip file on this computer.' },
+        name: { type: 'string', description: 'Name for the part in the timeline (single STL only).' },
         mode: { type: 'string', enum: ['auto', 'solid', 'mesh'], default: 'auto' },
         units: { type: 'string', enum: ['mm', 'cm', 'm', 'in'], default: 'mm' },
         scale: { type: 'number', default: 1 },

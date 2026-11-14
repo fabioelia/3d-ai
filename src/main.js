@@ -317,9 +317,9 @@ window.addEventListener('drop', (e) => {
   const files = [...e.dataTransfer.files];
   const project = files.find((f) => /\.json$/i.test(f.name));
   if (project) return openProject(project);
-  const stls = files.filter((f) => /\.stl$/i.test(f.name));
+  const stls = files.filter((f) => /\.(stl|zip)$/i.test(f.name));
   if (stls.length) act.importFiles(stls);
-  else toast('Drop .stl files to import them, or a .caliper.json project to open it.', 'error');
+  else toast('Drop .stl files (or a .zip of them) to import them, or a .caliper.json project to open it.', 'error');
 });
 
 // ---------- theme ----------

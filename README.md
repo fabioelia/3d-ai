@@ -10,7 +10,7 @@ A browser CAD tool for 3D-printable parts, in the spirit of Fusion's sketch → 
 - **Direct manipulation.** Click a face to sketch on it or push/pull it; click edges to fillet or chamfer them; click a face and Shell to hollow the part.
 - **Agents over MCP.** Claude Code, Claude Desktop, Cursor or any MCP client gets the whole app as tools: the full state, screenshots of what you see, exact geometry and measurements, printability checks, every edit, your selection, your camera, import and export. See [Use it with an AI agent](#use-it-with-an-ai-agent-mcp).
 - **Built-in assistant.** The same tools, in a side panel, with your own Claude account (as a Claude artifact) or an API key.
-- **STL import.** Drop STL files on the window. Small clean meshes become exact solids whose flat faces you can sketch on, fillet and shell; large ones become mesh bodies you can move, cut, join and pattern.
+- **STL import.** Drop STL files, or the zip a model site gave you, on the window. Common export defects (zero-area slivers, T-junctions, duplicate faces, near-miss vertices) are repaired automatically. Small clean meshes become exact solids whose flat faces you can sketch on, fillet and shell; large ones become mesh bodies you can move, cut, join and pattern; files that still are not closed solids come in as reference meshes you can view, move, measure and export.
 - **Export.** Binary STL (three mesh qualities) and STEP. Projects save as JSON, with imported STLs embedded, and autosave in the browser.
 
 ## Use it with an AI agent (MCP)
@@ -100,7 +100,7 @@ Outside claude.ai the built-in assistant calls the Claude API directly from the 
 | Repeat | Select a feature in the timeline → **Pattern** (rows or around an axis) or **Mirror**. |
 | Change anything later | Click the feature in the timeline and edit its numbers. Double-click a sketch to reopen it. |
 | Drive sizes from one place | Add a parameter (left panel) and type its name into any field. |
-| Bring in an STL | **Import**, File → Import STL, or drop files on the window. Set units, scale, placement and whether it comes in as an exact solid or a mesh in the inspector. |
+| Bring in an STL | **Import**, File → Import STL or zip, or drop files on the window. A zip imports every STL in it; several parts keep the layout they share (or are set out in a row if they would overlap). The inspector says how each part came in and what was repaired, and lets you set units, scale, placement and solid or mesh. |
 
 Mouse: drag orbits, right-drag pans, scroll zooms. While sketching, drag draws and right-drag orbits. Keys: `S` sketch, `E` extrude, `F` fillet, `Esc` back out, `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo; in a sketch `R` `C` `P` `O` `L` `T` `V` pick the tools.
 
@@ -142,7 +142,7 @@ The end-to-end scripts need Playwright with Chromium available to `require('play
 - A shell fails when the wall is thicker than a fillet or chamfer already on the body. Shell first, fillet after.
 - No lofts, sweeps, threads or drafts yet, and no assemblies. Units are millimetres.
 - Text uses one font (DejaVu Sans Bold) and shows as a placeholder box until extruded.
-- Imported STLs: curved areas of exact-solid imports stay faceted; mesh bodies have no selectable faces or edges, cannot be filleted, chamfered or shelled, and are left out of STEP files. Combining a mesh body with a solid gives a mesh body. STLs must be closed (watertight).
+- Imported STLs: curved areas of exact-solid imports stay faceted; mesh bodies have no selectable faces or edges, cannot be filleted, chamfered or shelled, and are left out of STEP files. Combining a mesh body with a solid gives a mesh body. Only verifiably closed meshes become solids; anything else (faces folded through each other, internal faces, holes the repair cannot close) is kept as a reference mesh, which never takes part in cuts or joins. Its volume is shown as approximate.
 - Safari may refuse the hosted page's connection to the local bridge; use the page the bridge serves (`http://127.0.0.1:7429/`) or another browser.
 
 OpenCascade is LGPL-2.1; replicad, three.js and the MCP SDK are MIT; Manifold is Apache-2.0; DejaVu fonts are under the Bitstream Vera licence.
