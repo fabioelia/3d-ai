@@ -8,7 +8,8 @@
     "build": "node scripts/prepare-kernel.mjs && vite build",
     "preview": "vite preview",
     "artifact": "npm run build && node scripts/make-artifact.mjs",
-    "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-assistant.cjs"
+    "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-assistant.cjs",
+    "deploy": "npm run build && node scripts/deploy-pages.mjs"
   },
   "keywords": [],
   "author": "",

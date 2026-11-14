@@ -22,7 +22,17 @@ npm run preview    # serve the build on http://127.0.0.1:4173
 
 ## Deploying
 
-Every push to `main` runs `.github/workflows/pages.yml`: install, kernel tests, build, publish `dist/` to GitHub Pages. It needs Pages switched on once: repository **Settings → Pages → Build and deployment → Source: GitHub Actions**. The build uses relative URLs, so it works under `/3d-ai/` or any other path without configuration.
+The site is served by GitHub Pages from the `gh-pages` branch, which holds only the built files.
+
+```bash
+npm run deploy     # build, then replace the gh-pages branch with the new build
+```
+
+Each deploy force-pushes one fresh commit to `gh-pages` (nothing but build output lives there). If Pages is not on yet: repository **Settings → Pages → Source: Deploy from a branch → `gh-pages` / root**.
+
+To deploy automatically on every push to `main` instead, copy `deploy/pages.yml` to `.github/workflows/pages.yml` and switch the Pages source to **GitHub Actions**. That workflow installs, runs the kernel tests, builds and publishes; after that `npm run deploy` and the `gh-pages` branch are no longer needed.
+
+The build uses relative URLs, so it works under `/3d-ai/` or any other path without configuration.
 
 `dist/` is a static site; host the three files together anywhere. `index.html` also works opened straight from disk, in which case the kernel and font are fetched from a public CDN instead.
 
