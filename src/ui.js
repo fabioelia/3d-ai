@@ -156,6 +156,101 @@ export function toast(msg, kind = 'info') {
 const scope = () => store.results?.params || {};
 const isPlain = (v) => typeof v === 'number' || /^\s*-?\d*\.?\d+\s*$/.test(String(v));
 
+// ---------- keeping the person's place across redraws ----------
+// Panels are rebuilt from the document, which replaces every control in them. A rebuild must not
+// cost the person their place: the focused control (found again by id, a data key, or its label and
+// position), its caret and half-typed text, the scroll of every list, and where the thing they just
+// clicked sits on screen.
+const isText = (el) => el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && /^(text|search|number|email|url|tel|password)$/.test(el.type));
+const ownKey = (el) => {
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  for (const k of ['key', 'id', 'body', 'sec']) if (el.dataset?.[k]) return `[data-${k}="${CSS.escape(el.dataset[k])}"]`;
+  return null;
+};
+const labelOf = (el) => el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent.trim().slice(0, 60);
+function keyOf(el, root) {
+  const own = ownKey(el);
+  if (own) return { own };
+  let scope = el.parentElement;
+  while (scope && scope !== root && !ownKey(scope)) scope = scope.parentElement;
+  const anc = scope && scope !== root ? ownKey(scope) : null;
+  const same = [...(anc ? scope : root).querySelectorAll(el.tagName)];
+  const label = labelOf(el);
+  return { anc, tag: el.tagName, label, nth: same.filter((x) => labelOf(x) === label).indexOf(el), idx: same.indexOf(el), count: same.length };
+}
+function findKey(k, root, loose = true) {
+  if (k.own) return root.querySelector(k.own);
+  const scope = k.anc ? root.querySelector(k.anc) : root;
+  if (!scope) return null;
+  const same = [...scope.querySelectorAll(k.tag)];
+  const byLabel = same.filter((x) => labelOf(x) === k.label);
+  // A button whose label flips (Hide / Show) is still the same button if nothing else moved.
+  return byLabel[k.nth] || byLabel[0] || (loose && same.length === k.count ? same[k.idx] : null) || null;
+}
+let lastPress = null;
+document.addEventListener(
+  'pointerdown',
+  (e) => {
+    const el = e.target instanceof Element ? e.target.closest('button,a,input,select,textarea,summary,label,tr,li,[tabindex]') || e.target : null;
+    lastPress = el ? { el, t: Date.now() } : null;
+  },
+  true,
+);
+const scrollerOf = (el) => {
+  for (let x = el.parentElement; x; x = x.parentElement) if (x.scrollHeight > x.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(x).overflowY)) return x;
+  return null;
+};
+// draw() redraws the panel; it returns true when the panel now shows something else, which starts
+// it at the top (unless the person clicked inside it, then what they clicked stays put).
+function keepPlace(root, draw) {
+  const active = document.activeElement;
+  const inside = active && active !== root && root.contains(active) ? active : null;
+  const pressed = lastPress && Date.now() - lastPress.t < 1500 && lastPress.el.isConnected && root.contains(lastPress.el) ? lastPress.el : null;
+  const scrolls = [];
+  for (let el = root; el; el = el.parentElement) if (el === root || el.scrollTop || el.scrollLeft) scrolls.push([el, el.scrollTop, el.scrollLeft]);
+  const inner = [...root.querySelectorAll('[data-scroll]')].map((el) => [el.dataset.scroll, el.scrollTop, el.scrollLeft]);
+  let focus = null;
+  if (inside) {
+    focus = { el: inside, key: keyOf(inside, root), text: isText(inside), value: inside.value };
+    try {
+      if (focus.text) Object.assign(focus, { start: inside.selectionStart, end: inside.selectionEnd, dir: inside.selectionDirection });
+    } catch {
+      /* no caret on this kind of input */
+    }
+  }
+  const anchorEl = inside || pressed;
+  const anchor = anchorEl ? { el: anchorEl, key: inside ? focus.key : keyOf(anchorEl, root), top: anchorEl.getBoundingClientRect().top } : null;
+  const fresh = draw();
+  const put = (el, top, left) => {
+    if (el.scrollTop !== top) el.scrollTop = top;
+    if (el.scrollLeft !== left) el.scrollLeft = left;
+  };
+  for (const [el, top, left] of scrolls) put(el, top, left);
+  for (const [k, top, left] of inner) {
+    const el = root.querySelector(`[data-scroll="${k}"]`);
+    if (el) put(el, top, left);
+  }
+  const again = anchor && !anchor.el.isConnected ? findKey(anchor.key, root, !fresh) : anchor?.el;
+  if (again) {
+    const sc = scrollerOf(again);
+    const shift = again.getBoundingClientRect().top - anchor.top;
+    if (sc && Math.abs(shift) > 0.5) sc.scrollTop += shift;
+  } else if (fresh) root.scrollTop = 0;
+  if (focus && document.activeElement !== focus.el) {
+    const el = focus.el.isConnected ? focus.el : findKey(focus.key, root, !fresh);
+    // Showing another thing: do not drop the caret (and the half-typed text) into its fields.
+    if (el && !(fresh && focus.text) && el !== document.activeElement && !el.disabled) {
+      if (focus.text && isText(el) && el.value !== focus.value) el.value = focus.value;
+      el.focus({ preventScroll: true });
+      try {
+        if (focus.text && isText(el) && focus.start != null) el.setSelectionRange(focus.start, focus.end, focus.dir || 'none');
+      } catch {
+        /* no caret on this kind of input */
+      }
+    }
+  }
+}
+
 // ---------- controls ----------
 function exprInput({ get, set, unit, def, id, label }) {
   const input = h('input', { type: 'text', class: 'in', id, inputmode: 'text', spellcheck: 'false', autocomplete: 'off', 'aria-label': label, value: String(get() ?? def ?? '') });
@@ -198,7 +293,8 @@ function exprInput({ get, set, unit, def, id, label }) {
   input.addEventListener('change', () => {
     const raw = input.value.trim();
     const cur = get();
-    if (String(cur ?? '') !== (raw === '' ? '' : String(isPlain(raw) ? Number(raw) : raw))) commit();
+    // After Tab has moved the focus on: a change that redraws the panel then keeps the focus where it went.
+    if (String(cur ?? '') !== (raw === '' ? '' : String(isPlain(raw) ? Number(raw) : raw))) setTimeout(commit);
   });
   input.addEventListener('keydown', (e) => {
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && isPlain(input.value)) {
@@ -245,8 +341,10 @@ function renderToolbar() {
 // ---------- parameters ----------
 function renderParams() {
   const box = $('params');
-  const focused = box.contains(document.activeElement) ? document.activeElement : null;
-  const keep = focused?.id ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd } : null;
+  keepPlace(box, () => drawParams(box));
+}
+
+function drawParams(box) {
   refreshersFor('params', []);
   const list = [];
   const rows = store.doc.params.map((p, i) => {
@@ -326,7 +424,7 @@ function renderParams() {
   applyFilter();
   box.replaceChildren(
     ...(filter ? [filter] : []),
-    h('div', { class: 'p-list' }, ...rows, none),
+    h('div', { class: 'p-list', 'data-scroll': 'params' }, ...rows, none),
     h(
       'button',
       {
@@ -348,17 +446,6 @@ function renderParams() {
       'Add parameter',
     ),
   );
-  if (keep) {
-    const el = $(keep.id);
-    if (el && el !== document.activeElement) {
-      el.focus();
-      try {
-        el.setSelectionRange(keep.start, keep.end);
-      } catch {
-        /* not a text field */
-      }
-    }
-  }
 }
 
 // Renaming a parameter also rewrites the expressions that use it.
@@ -431,7 +518,7 @@ function renderTimeline() {
     if (f.id === rolled) after = true;
     return li;
   });
-  ol.replaceChildren(...(items.length ? items : [h('li', { class: 'tl-empty' }, 'Nothing here yet. Start with Sketch or a Box, or ask the assistant for a first draft.')]));
+  keepPlace(ol, () => ol.replaceChildren(...(items.length ? items : [h('li', { class: 'tl-empty' }, 'Nothing here yet. Start with Sketch or a Box, or ask the assistant for a first draft.')])));
 }
 
 // ---------- bodies ----------
@@ -478,14 +565,14 @@ function renderBodies() {
       }),
     );
   });
-  ol.replaceChildren(...(items.length ? items : [h('li', { class: 'tl-empty' }, 'Solids show up here once you make them.')]));
+  keepPlace(ol, () => ol.replaceChildren(...(items.length ? items : [h('li', { class: 'tl-empty' }, 'Solids show up here once you make them.')])));
 }
 
 function bodyInspector(box, b) {
   const hidden = act.isHidden(b.id);
   const maker = featureById(b.id) || featureById(String(b.id).split('_')[0]);
   const name = h('input', { type: 'text', class: 'in insp-name', id: 'body-name', 'aria-label': 'Body name', spellcheck: 'false', value: b.name });
-  name.addEventListener('change', () => act.renameBody(b.id, name.value.trim()));
+  name.addEventListener('change', () => setTimeout(() => act.renameBody(b.id, name.value.trim())));
   name.addEventListener('keydown', (e) => e.key === 'Enter' && name.blur());
   const size = b.max.map((v, i) => fmt(v - b.min[i], 1)).join(' × ');
   const board = b.kind === 'board';
@@ -718,7 +805,7 @@ function fieldControl(obj, fd, setKey, idp) {
     case 'vec3':
       return vec3Field(obj, fd, setKey, idp);
     case 'bodies':
-      return bodiesField(obj, fd, setKey);
+      return bodiesField(obj, fd, setKey, idp);
     case 'edges':
     case 'faces':
       return selectorField(obj, fd, setKey);
@@ -749,19 +836,21 @@ function fieldControl(obj, fd, setKey, idp) {
 }
 
 // Which bodies a feature acts on: a checklist of the model's bodies; none ticked means all of them.
-function bodiesField(obj, fd, setKey) {
+function bodiesField(obj, fd, setKey, idp) {
   const list = printableBodies().filter((b) => !b.id.startsWith(`${obj.id}_`));
   const cur = [].concat(obj[fd.key] || []);
   if (!list.length) return h('span', { class: 'insp-note' }, 'No bodies yet.');
   const toggle = (id, on) => {
-    const next = on ? [...cur.filter((x) => x !== id), id] : cur.filter((x) => x !== id);
+    // None listed means all of them, so unticking one starts from all the others.
+    const base = cur.length ? cur : list.map((b) => b.id);
+    const next = on ? [...base.filter((x) => x !== id), id] : base.filter((x) => x !== id);
     setKey(next.length && next.length < list.length ? next : undefined);
   };
   return h(
     'div',
-    { class: 'body-checks' },
+    { class: 'body-checks', 'data-scroll': `${idp}-${fd.key}` },
     list.map((b) => {
-      const el = h('input', { type: 'checkbox', onchange: () => toggle(b.id, el.checked) });
+      const el = h('input', { type: 'checkbox', id: `${idp}-${fd.key}-${b.id}`, onchange: () => toggle(b.id, el.checked) });
       el.checked = !cur.length || cur.includes(b.id) || cur.includes(b.name);
       return h('label', { class: 'body-check', onmouseenter: () => emit('body-hover', b.id), onmouseleave: () => emit('body-hover', null) }, el, h('span', {}, b.name));
     }),
@@ -1207,7 +1296,7 @@ function boardRows(f, setter) {
           parts.map((p) =>
             h(
               'tr',
-              { class: `${p.ref === ref ? 'sel' : ''}${p.off ? ' off' : ''}`, tabindex: '0', title: [p.value, p.package].filter(Boolean).join(' · '), onclick: () => (act.editBoard(f.id), select({ shape: p.ref })) },
+              { class: `${p.ref === ref ? 'sel' : ''}${p.off ? ' off' : ''}`, 'data-key': `part-${p.ref}`, tabindex: '0', title: [p.value, p.package].filter(Boolean).join(' · '), onclick: () => (act.editBoard(f.id), select({ shape: p.ref })) },
               h('td', {}, h('span', { class: 'swatch', style: `background:${p.color || '#3a3d44'}` }), p.ref),
               h('td', {}, p.off ? 'off' : p.side || 'top'),
               h('td', { class: 'num' }, `${fmt(n(p.body?.w), 1)} × ${fmt(n(p.body?.d), 1)} × ${fmt(n(p.h), 1)}`),
@@ -1236,39 +1325,32 @@ function inspectorSignature() {
   return [bsig, psig, act.autoExtrude(sel.feature) ? 'auto' : '', brd, sizes, store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
 }
 
-// Redraws keep the field being typed in focused (same id), with its caret where it was.
+// Redraws keep the person's place: the focused control, its caret, the scroll (see keepPlace).
+// Showing something else starts at the top, unless it was picked from inside the inspector.
 function renderInspector(force = false) {
   const box = $('inspector');
-  const el = box.contains(document.activeElement) ? document.activeElement : null;
-  const keep = el?.id && el.tagName === 'INPUT' ? { id: el.id, start: el.selectionStart, end: el.selectionEnd, value: el.value } : null;
-  drawInspector(force);
-  if (keep && !box.contains(document.activeElement)) {
-    const again = $(keep.id);
-    if (again && again.tagName === 'INPUT') {
-      if (again.value !== keep.value && again.type === 'text') again.value = keep.value;
-      again.focus();
-      try {
-        again.setSelectionRange(keep.start, keep.end);
-      } catch {
-        /* not a text field */
-      }
-    }
-  }
+  keepPlace(box, () => {
+    const showing = `${store.sel.feature}|${store.sel.body}|${printOpen}|${store.mode.kind}|${store.sel.shape}`;
+    if (!drawInspector(force)) return false;
+    const fresh = showing !== inspectorShowing;
+    inspectorShowing = showing;
+    return fresh;
+  });
 }
 
 function drawInspector(force = false) {
   const sig = inspectorSignature();
-  if (!force && sig === inspectorSig) return;
+  if (!force && sig === inspectorSig) return false;
   inspectorSig = sig;
   refreshers = [];
   const box = $('inspector');
   const { mode, sel } = store;
   const info = store.results?.features || {};
-  const showing = `${sel.feature}|${mode.kind}|${sel.shape}`;
-  if (showing !== inspectorShowing) {
-    inspectorShowing = showing;
-    requestAnimationFrame(() => (box.scrollTop = 0));
-  }
+  fillInspector(box, mode, sel, info);
+  return true;
+}
+
+function fillInspector(box, mode, sel, info) {
   box.classList.toggle('tall', featureById(sel.feature)?.type === 'board');
 
   // A shape inside the open sketch.
@@ -1505,7 +1587,7 @@ function renderModebar() {
     ];
   }
   bar.hidden = !kids;
-  bar.replaceChildren(...(kids || []).filter(Boolean));
+  keepPlace(bar, () => bar.replaceChildren(...(kids || []).filter(Boolean)));
   const hint = $('hint');
   hint.textContent =
     mode.kind === 'board'

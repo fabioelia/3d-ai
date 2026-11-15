@@ -7,7 +7,7 @@
     "dev": "node scripts/prepare-kernel.mjs && vite",
     "preview": "vite preview",
     "artifact": "npm run bundle && node scripts/make-artifact.mjs",
-    "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-board.cjs && node scripts/e2e-bodies.cjs",
+    "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-board.cjs && node scripts/e2e-bodies.cjs && node scripts/e2e-ui-quirks.cjs",
     "deploy": "npm run bundle && node scripts/deploy-pages.mjs",
     "bridge": "node bridge/server.mjs --http",
     "test:bridge": "node scripts/e2e-bridge.mjs",

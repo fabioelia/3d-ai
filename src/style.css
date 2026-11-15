@@ -1105,6 +1105,9 @@ input.in:not([type='password']):not(.insp-name):not(.p-name) {
 .chat-form textarea {
   font-family: var(--sans);
 }
+.chat-form textarea:read-only {
+  opacity: 0.6;
+}
 .as-note {
   margin: 0;
   font-size: 11px;

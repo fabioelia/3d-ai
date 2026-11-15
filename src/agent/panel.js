@@ -13,10 +13,12 @@ let link = null;
 
 function line(by, textContent, kind = '') {
   const log = $('chat-log');
+  // Follow new lines only while the person is at the bottom, so reading back up is not yanked down.
+  const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
   const el = h('div', { class: `agent-line ${kind}` }, h('span', { class: 'agent-who' }, by), h('span', { class: 'agent-what' }, textContent));
   log.append(el);
   while (log.children.length > 400) log.firstChild.remove();
-  log.scrollTop = log.scrollHeight;
+  if (follow) log.scrollTop = log.scrollHeight;
   $('chat-empty').hidden = true;
   $('chat-suggest').hidden = true;
 }

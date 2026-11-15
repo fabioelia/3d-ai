@@ -198,7 +198,9 @@ ok(a0[a0.indexOf('--tools') + 1] === '' && a0[a0.indexOf('--allowedTools') + 1] 
 const env0 = JSON.parse(fs.readFileSync(envLog, 'utf8').trim().split('\n')[0]);
 ok(env0.CLAUDECODE === null && env0.CLAUDE_CODE_OAUTH_TOKEN === null && env0.CLAUDE_CONFIG_DIR, `the chat's Claude Code does not inherit the parent session's variables, but keeps the config dir: ${JSON.stringify(env0)}`);
 await page.fill('#chat-input', 'make it taller');
-await page.click('#chat-send');
+await page.press('#chat-input', 'Enter');
+const kept = await page.evaluate(() => [document.activeElement?.id, !!document.querySelector('#assistant.running')]);
+ok(kept[0] === 'chat-input', `sending with Enter keeps the focus in the message box while Claude works, so typing does not hit the model's shortcuts (${kept})`);
 await page.waitForFunction(() => !document.querySelector('#assistant.running') && /25 mm tall/.test(document.getElementById('chat-log').innerText), null, { timeout: 60000 }).catch(() => {});
 const runs2 = fs.readFileSync(chatLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((a) => a[0] === '-p');
 const sid = runs2[0].includes('--resume') ? null : runs2[1][runs2[1].indexOf('--resume') + 1];

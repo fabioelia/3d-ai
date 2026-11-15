@@ -35,8 +35,11 @@ function defaultName(type) {
 export function addFeature(type, props = {}, { by = 'user', focus = true } = {}) {
   const f = { id: newFeatureId(type), type, name: defaultName(type), ...structuredClone(DEFAULTS[type] || {}), ...props };
   update((doc) => doc.features.push(f), { by });
-  // An agent adding a feature opens it in the inspector but leaves the person's selection alone.
-  select(by === 'user' ? { feature: f.id, shape: null, picks: [] } : { feature: f.id, shape: null }, { by });
+  // An agent adding a feature opens it in the inspector but leaves the person's selection alone,
+  // and never while the person is typing in the inspector (that would take the field from under them).
+  const el = typeof document === 'undefined' ? null : document.activeElement;
+  const typing = by !== 'user' && el?.closest?.('#inspector') && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+  if (!typing) select(by === 'user' ? { feature: f.id, shape: null, picks: [] } : { feature: f.id, shape: null }, { by });
   if (by === 'user' && focus) emit('focus-first');
   return f;
 }

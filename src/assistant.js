@@ -194,6 +194,9 @@ function friendly(msg = '') {
 }
 
 // ---------- UI ----------
+// New text follows the bottom of the log only while the person is there, so reading back up is not yanked down.
+const atBottom = (log) => log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+
 function bubble(role, text) {
   const body = h('div', { class: 'msg-text' }, text);
   const steps = h('div', { class: 'msg-steps' });
@@ -206,7 +209,9 @@ function bubble(role, text) {
 function setRunning(on) {
   $('chat-send').hidden = on;
   $('chat-stop').hidden = !on;
-  $('chat-input').disabled = on;
+  // Read-only rather than disabled: disabling would throw the focus out of the box, and the next
+  // keys typed would land on the model's shortcuts (E extrudes, F fillets…).
+  $('chat-input').readOnly = on;
   $('assistant').classList.toggle('running', on);
 }
 
@@ -263,9 +268,10 @@ async function send(text) {
   let got = '';
   const onText = (whole) => {
     got = whole;
+    const follow = atBottom($('chat-log'));
     out.el.classList.remove('pending');
     out.body.textContent = whole;
-    $('chat-log').scrollTop = $('chat-log').scrollHeight;
+    if (follow) $('chat-log').scrollTop = $('chat-log').scrollHeight;
   };
   try {
     const answer = await ask(message, images.map((a) => ({ mediaType: a.mediaType, data: a.data })), turn, ctl.signal, onText);
