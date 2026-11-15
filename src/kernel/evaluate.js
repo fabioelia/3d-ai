@@ -1411,6 +1411,75 @@ export function createKernel(r) {
     return { total: els.length, items };
   }
 
+  // Smallest distance between two bodies' triangulations, looking only at the other body's triangles
+  // inside `zone` (the part's box grown by the clearance): vertex-to-triangle both ways.
+  function meshGap(A, B, zone) {
+    const ta = bodyTriangles(A);
+    const tb = bodyTriangles(B);
+    const pick = (m, box) => {
+      const out = [];
+      const V = m.vertices;
+      const T = m.triangles;
+      for (let i = 0; i < T.length; i += 3) {
+        const a = T[i] * 3;
+        const b = T[i + 1] * 3;
+        const c = T[i + 2] * 3;
+        let ok = true;
+        for (let k = 0; k < 3 && ok; k++) if (Math.max(V[a + k], V[b + k], V[c + k]) < box.min[k] || Math.min(V[a + k], V[b + k], V[c + k]) > box.max[k]) ok = false;
+        if (ok) out.push([[V[a], V[a + 1], V[a + 2]], [V[b], V[b + 1], V[b + 2]], [V[c], V[c + 1], V[c + 2]]]);
+      }
+      return out;
+    };
+    const near = pick(tb, zone);
+    if (!near.length) return Infinity;
+    const zb = { min: zone.min, max: zone.max };
+    const mine = pick(ta, zb);
+    let best = Infinity;
+    const test = (pts, tris) => {
+      for (const p of pts) for (const t of tris) best = Math.min(best, pointTri(p, t));
+    };
+    const verts = (tris) => {
+      const seen = new Map();
+      for (const t of tris) for (const v of t) seen.set(v.join(), v);
+      return [...seen.values()];
+    };
+    test(verts(mine), near);
+    test(verts(near), mine);
+    return best;
+  }
+  function pointTri(p, [a, b, c]) {
+    // Closest point on a triangle (Ericson, Real-Time Collision Detection 5.1.5).
+    const sub = (u, v) => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+    const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    const ab = sub(b, a);
+    const ac = sub(c, a);
+    const ap = sub(p, a);
+    const d1 = dot(ab, ap);
+    const d2 = dot(ac, ap);
+    const dist = (q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+    const at = (s, t) => [a[0] + ab[0] * s + ac[0] * t, a[1] + ab[1] * s + ac[1] * t, a[2] + ab[2] * s + ac[2] * t];
+    if (d1 <= 0 && d2 <= 0) return dist(a);
+    const bp = sub(p, b);
+    const d3 = dot(ab, bp);
+    const d4 = dot(ac, bp);
+    if (d3 >= 0 && d4 <= d3) return dist(b);
+    const vc = d1 * d4 - d3 * d2;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0) return dist(at(d1 / (d1 - d3), 0));
+    const cp = sub(p, c);
+    const d5 = dot(ab, cp);
+    const d6 = dot(ac, cp);
+    if (d6 >= 0 && d5 <= d6) return dist(c);
+    const vb = d5 * d2 - d1 * d6;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) return dist(at(0, d2 / (d2 - d6)));
+    const va = d3 * d6 - d5 * d4;
+    if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+      const w = (d4 - d3) / (d4 - d3 + (d5 - d6));
+      return dist([b[0] + (c[0] - b[0]) * w, b[1] + (c[1] - b[1]) * w, b[2] + (c[2] - b[2]) * w]);
+    }
+    const den = 1 / (va + vb + vc);
+    return dist(at(vb * den, vc * den));
+  }
+
   // Boards and their parts against the rest of the model (an enclosure): what collides, and what
   // comes closer than `clearance`. Each part is tested as its own body.
   function interference({ board = null, clearance = 0.5 } = {}) {
@@ -1435,15 +1504,11 @@ export function createKernel(r) {
           out.push({ ...who, kind: 'collides', volume: rnd(vol) });
           continue;
         }
+        if (p.kind === 'board') continue; // a board resting on posts or ledges is held, not crowded
         if (clearance > 0 && (isMesh(p.shape) || isMesh(o.shape))) {
-          // Meshes have no exact distance: test the part's box grown by the clearance instead.
-          try {
-            const grownBox = r.makeBox(grown.min, grown.max);
-            const x = boolean(grownBox, o.shape, 'intersect');
-            if (!isEmpty(x) && (isMesh(x) ? meshDisplay(x).volume : r.measureVolume(x)) > 1e-3) out.push({ ...who, kind: 'close', distance: null, approximate: true });
-          } catch {
-            /* no proximity for this pair */
-          }
+          // Meshes have no exact distance: measure between the two triangulations, near the part.
+          const d = meshGap(p, o, grown);
+          if (d < clearance) out.push({ ...who, kind: 'close', distance: rnd(d), approximate: true });
         } else if (clearance > 0) {
           try {
             const d = r.measureDistanceBetween(p.shape, o.shape);

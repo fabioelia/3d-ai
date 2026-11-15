@@ -187,11 +187,17 @@ export async function addStandoffs(boardId, { wall = 1.8, screw = null, by = 'us
   const hits = await app.kernel.surfaceBelow(holes.map((h) => [at[0] + h.x, at[1] + h.y, at[2] - 0.01]));
   const added = [];
   const skipped = [];
+  const nothingBelow = [];
+  if (hits.every((x) => !x)) return { error: 'Nothing of the enclosure is under the board\'s holes (an open tube, or a separate bottom piece not imported yet). Import or model the part the board should stand on, then add standoffs.' };
   const r3 = (v) => Math.round(v * 1000) / 1000;
   update(
     (doc) => {
       holes.forEach((h, i) => {
-        const base = hits[i] ? hits[i].z : 0;
+        if (!hits[i]) {
+          nothingBelow.push(i + 1);
+          return;
+        }
+        const base = hits[i].z;
         const height = r3(at[2] - base);
         if (height < 0.5) {
           skipped.push(i + 1);
@@ -202,7 +208,7 @@ export async function addStandoffs(boardId, { wall = 1.8, screw = null, by = 'us
         const d = r3(Math.max(5, h.d + 2 * wall));
         const pilot = r3(screw ?? Math.round(h.d * 0.78 * 10) / 10);
         const depth = r3(Math.min(height, 8));
-        const post = { id: newFeatureId('cylinder'), type: 'cylinder', name: `Standoff ${i + 1}`, d, h: height, at: [x, y, r3(base)], op: hits[i] ? 'join' : 'new' };
+        const post = { id: newFeatureId('cylinder'), type: 'cylinder', name: `Standoff ${i + 1}`, d, h: height, at: [x, y, r3(base)], op: 'join' };
         const bore = { id: newFeatureId('cylinder'), type: 'cylinder', name: `Screw hole ${i + 1}`, d: pilot, h: depth, at: [x, y, r3(at[2] - depth)], op: 'cut' };
         doc.features.push(post, bore);
         added.push(post.id, bore.id);
@@ -211,7 +217,7 @@ export async function addStandoffs(boardId, { wall = 1.8, screw = null, by = 'us
     { by, key: `standoffs:${Date.now()}` },
   );
   await app.rebuildNow();
-  return { added: added.length / 2, skipped, onSurface: hits.filter(Boolean).length };
+  return { added: added.length / 2, skipped, nothingBelow };
 }
 
 export function startPick(feature, key, kind) {

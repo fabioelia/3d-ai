@@ -664,7 +664,7 @@ function boardRows(f, setter) {
           onclick: async () => {
             const res = await act.addStandoffs(f.id);
             if (res.error) return toast(res.error, 'error');
-            toast(`Added ${res.added} standoff${res.added === 1 ? '' : 's'}${res.onSurface < res.added ? ` (${res.added - res.onSurface} start on the bed: nothing is under them)` : ', joined to the enclosure'}, with ${res.added === 1 ? 'a pilot hole' : 'pilot holes'} for self-tapping screws.${res.skipped.length ? ` Holes ${res.skipped.join(', ')} sit right on a surface.` : ''}`);
+            toast(`Added ${res.added} standoff${res.added === 1 ? '' : 's'}, joined to the enclosure below, with ${res.added === 1 ? 'a pilot hole' : 'pilot holes'} for self-tapping screws.${res.nothingBelow.length ? ` Nothing is under hole${res.nothingBelow.length === 1 ? '' : 's'} ${res.nothingBelow.join(', ')}, so ${res.nothingBelow.length === 1 ? 'it has' : 'they have'} none.` : ''}${res.skipped.length ? ` Holes ${res.skipped.join(', ')} sit right on a surface.` : ''}`);
           },
         }, 'Add standoffs'),
         h('button', {
@@ -812,7 +812,7 @@ function boardRows(f, setter) {
           try {
             const res = await act.app.kernel.interference({ board: f.id, clearance: 0.5 });
             fit.replaceChildren(
-              ...(res.bodies ? (res.issues.length ? res.issues.map((i) => h('li', { class: i.kind === 'collides' ? 'bi-overlap' : 'bi-edge' }, i.kind === 'collides' ? `${i.part} runs into ${i.body} (${fmt(i.volume, 1)} mm³ overlap).` : i.distance === null ? `${i.part} comes within 0.5 mm of ${i.body} (measured on its box: the enclosure is a mesh).` : `${i.part} is ${fmt(i.distance, 2)} mm from ${i.body}.`)) : [h('li', { class: 'bi-ok' }, `Fits: no part touches or comes within 0.5 mm of ${res.bodies === 1 ? 'the other body' : `the ${res.bodies} other bodies`}.`)]) : [h('li', { class: 'bi-info' }, 'There is nothing else in the model to check against yet. Import or model the enclosure.')]),
+              ...(res.bodies ? (res.issues.length ? res.issues.map((i) => h('li', { class: i.kind === 'collides' ? 'bi-overlap' : 'bi-edge' }, i.kind === 'collides' ? `${i.part} runs into ${i.body} (${fmt(i.volume, 1)} mm³ overlap).` : `${i.part} is ${fmt(i.distance, 2)} mm from ${i.body}${i.approximate ? ' (measured on the mesh)' : ''}.`)) : [h('li', { class: 'bi-ok' }, `Fits: no part touches or comes within 0.5 mm of ${res.bodies === 1 ? 'the other body' : `the ${res.bodies} other bodies`}.`)]) : [h('li', { class: 'bi-info' }, 'There is nothing else in the model to check against yet. Import or model the enclosure.')]),
             );
           } catch (e) {
             fit.replaceChildren(h('li', { class: 'bi-overlap' }, e.message));

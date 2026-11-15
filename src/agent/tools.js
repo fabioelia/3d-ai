@@ -702,7 +702,7 @@ IMPL.check_board = async (args) => {
   out.problems = issues.map((i) => ({ kind: i.kind, parts: i.refs, message: i.message }));
   if (args.enclosure !== false) {
     const fit = await act.app.kernel.interference({ board: b.id, clearance: args.clearance ?? 0.5 });
-    out.enclosure = fit.bodies ? { checked_against: fit.bodies, issues: fit.issues.map((i) => (i.kind === 'collides' ? `${i.part} runs into ${i.body} (${i.bodyId}): ${i.volume} mm³ overlap.` : i.distance === null ? `${i.part} comes within ${args.clearance ?? 0.5} mm of ${i.body} (${i.bodyId}) (approximate: the enclosure is a mesh, measured on the part's box).` : `${i.part} is ${i.distance} mm from ${i.body} (${i.bodyId}).`)) } : { note: 'No other bodies to check against (model or import the enclosure).' };
+    out.enclosure = fit.bodies ? { checked_against: fit.bodies, issues: fit.issues.map((i) => (i.kind === 'collides' ? `${i.part} runs into ${i.body} (${i.bodyId}): ${i.volume} mm³ overlap.` : `${i.part} is ${i.distance} mm from ${i.body} (${i.bodyId})${i.approximate ? ', measured on the meshes' : ''}.`)) } : { note: 'No other bodies to check against (model or import the enclosure).' };
   }
   const nb = numericBoard(b, num);
   if ((nb.traces || []).length || (nb.vias || []).length) {
