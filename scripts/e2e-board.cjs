@@ -205,6 +205,21 @@ const ok = (c, m) => {
   const kb = await p.evaluate(() => JSON.parse(JSON.stringify(window.caliper.store.doc.features.filter((x) => x.type === 'board')[1])));
   ok(kb.parts.length === 3 && kb.traces.length === 4 && kb.vias.length === 1 && kb.holes.length === 1 && kb.outline.kind === 'path', `a KiCad board imports with parts, copper, holes and outline (${kb.parts.length} parts, ${kb.traces.length} traces)`);
   await p.screenshot({ path: `${dir}/e2e-board-kicad.png` });
+  // Line the KiCad board up on top of the first one.
+  await p.evaluate(() => window.caliper.act.leaveMode());
+  await p.click('.tl-item >> nth=-1');
+  await p.selectOption('#lineup-target', { index: 0 });
+  const targetName = await p.$eval('#lineup-target', (e) => e.selectedOptions[0].textContent);
+  await p.click('text=On top');
+  await settle();
+  const stack = await p.evaluate((name) => {
+    const bs = window.caliper.store.results.bodies;
+    const t = bs.find((b) => b.name === name);
+    const kb = window.caliper.store.doc.features.filter((x) => x.type === 'board')[1].id;
+    const mine = bs.filter((b) => b.id === kb || (b.board === kb && !b.detail));
+    return { tTop: t.max[2], mineBottom: Math.min(...mine.map((b) => b.min[2])) };
+  }, targetName);
+  ok(Math.abs(stack.tTop - stack.mineBottom) < 0.01, `Line up with → On top stacks one body on another (${JSON.stringify(stack)})`);
 
   // --- routing: autoroute, then the design rules pass and nothing is left to route
   await p.evaluate(() => window.caliper.act.editBoard(window.caliper.store.doc.features.find((f) => f.type === 'board').id));

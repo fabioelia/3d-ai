@@ -461,6 +461,31 @@ function fieldRows(obj, fields, setter, idp) {
   return fields.filter((fd) => !fd.showIf || fd.showIf(obj)).map((fd) => (fd.type === 'bool' ? h('label', { class: 'row check' }, fieldControl(obj, fd, (v) => setter(fd.key, v), idp), h('span', {}, fd.label)) : row(fd.label, fieldControl(obj, fd, (v) => setter(fd.key, v), idp), fd.hint)));
 }
 
+// ---------- lining one body up with another ----------
+// Imported parts of one assembly often come in side by side; this stacks one under, on or around
+// another by changing its position (centres in plan, faces touching in height).
+function lineUpRows(f, setter) {
+  const bodies = store.results?.bodies || [];
+  const mine = bodies.filter((b) => b.id === f.id || (f.type === 'board' && b.board === f.id));
+  const others = bodies.filter((b) => !mine.includes(b) && !b.detail && b.kind !== 'part' && b.kind !== 'copper');
+  if (!mine.length || !others.length) return [];
+  const box = (list) => ({ min: [0, 1, 2].map((k) => Math.min(...list.map((b) => b.min[k]))), max: [0, 1, 2].map((k) => Math.max(...list.map((b) => b.max[k]))) });
+  const target = h('select', { class: 'in', id: 'lineup-target', 'aria-label': 'Line up with' }, others.map((b) => h('option', { value: b.id }, b.name)));
+  const go = (how) => {
+    const t = (store.results?.bodies || []).find((b) => b.id === target.value);
+    const me = box((store.results?.bodies || []).filter((b) => b.id === f.id || (f.type === 'board' && b.board === f.id && !b.detail)));
+    if (!t) return;
+    const d = [(t.min[0] + t.max[0]) / 2 - (me.min[0] + me.max[0]) / 2, (t.min[1] + t.max[1]) / 2 - (me.min[1] + me.max[1]) / 2, how === 'under' ? t.min[2] - me.max[2] : how === 'on' ? t.max[2] - me.min[2] : (t.min[2] + t.max[2]) / 2 - (me.min[2] + me.max[2]) / 2];
+    const cur = (f.at || [0, 0, 0]).map((v) => (typeof v === 'number' ? v : evalExpr(v, scope())));
+    setter('at', cur.map((v, i) => Math.round((v + d[i]) * 1000) / 1000));
+    toast(`${featureLabel(f)} is now ${how === 'under' ? 'under' : how === 'on' ? 'on top of' : 'centred in'} ${t.name}.`);
+  };
+  return [
+    row('Line up with', target),
+    h('div', { class: 'insp-actions' }, ...[['under', 'Under it'], ['on', 'On top'], ['in', 'Centred in it']].map(([how, label]) => h('button', { class: 'btn small', type: 'button', onclick: () => go(how) }, label))),
+  ];
+}
+
 // ---------- boards ----------
 const OUTLINES = [
   ['rect', 'Rectangle'],
@@ -939,6 +964,7 @@ function renderInspector(force = false) {
       f.suppressed ? h('div', { class: 'insp-warn' }, 'Suppressed: this feature is skipped until you turn it back on.') : null,
       !err && info[f.id]?.note && f.type !== 'board' ? h('p', { class: 'insp-note' }, info[f.id].note) : null,
       ...(f.type === 'board' ? boardRows(f, setter) : fieldRows(f, def.fields, setter, 'f')),
+      ...(f.type === 'import' || f.type === 'board' ? lineUpRows(f, setter) : []),
     ];
     if (f.type === 'sketch') {
       const editing = mode.kind === 'sketch' && mode.id === f.id;
