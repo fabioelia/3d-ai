@@ -123,7 +123,22 @@ const ok = (c, m) => {
   await p.keyboard.press('h');
   ok((await mode()).tool === 'hole', 'H picks the hole tool');
   f = await board();
-  const spot = await at([f.outline.w / 2 - 4, -f.outline.h / 2 + 4]);
+  // A free spot on the board, away from every part.
+  const free = await p.evaluate(() => {
+    const ed = window.caliper.act.app.board;
+    const b = ed.api.board();
+    const els = [...ed.el.querySelectorAll('[data-ref]')].map((e) => e.getBoundingClientRect());
+    const r = ed.el.getBoundingClientRect();
+    for (let y = -b.outline.h / 2 + 3; y < b.outline.h / 2 - 3; y += 1)
+      for (let x = -b.outline.w / 2 + 3; x < b.outline.w / 2 - 3; x += 1) {
+        const s = ed.toS([x, y]);
+        const px = r.left + s[0];
+        const py = r.top + s[1];
+        if (!els.some((e) => px > e.left - 12 && px < e.right + 12 && py > e.top - 12 && py < e.bottom + 12)) return [x, y];
+      }
+    return [0, 0];
+  });
+  const spot = await at(free);
   await p.mouse.click(spot[0], spot[1]);
   f = await board();
   ok(f.holes.length === 1 && f.holes[0].d === 3.2, `clicking adds a mounting hole (${JSON.stringify(f.holes)})`);

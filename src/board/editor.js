@@ -6,6 +6,7 @@ import { evalExpr } from '../expr.js';
 import { boardPolygon, partPolygon, footprintPolygon, toBoard, checkBoard, boardExtent, overBoard, turnPart, flipPart, autoPlace, bodyCenter } from './geometry.js';
 import { airwires, connectivity, drc, copperItems, numericBoard, rulesOf, ptSeg } from './route.js';
 import { pointInPolygon } from '../sketchgeo.js';
+import { arrangeBoard, improvePlacement } from './placement.js';
 
 export const GRIDS = [0.1, 0.25, 0.5, 1, 1.27, 2.54, 5];
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -236,12 +237,33 @@ export class BoardEditor {
       if (!far) labels.push(`<text x="${lx.toFixed(1)}" y="${(ly + fs * 0.35).toFixed(1)}" font-size="${fs.toFixed(1)}" font-weight="600" text-anchor="middle" fill="${c.text}" stroke="rgba(0,0,0,0.55)" stroke-width="2.5" paint-order="stroke" pointer-events="none">${esc(p.ref)}</text>`);
     }
     // Copper: the far layer faint, then vias, then the near layer.
-    const nb = numericBoard(b, this.n);
-    const conn = connectivity(nb);
+    // Connectivity (with pours) is reused while only the view or the cursor changes; pours are left
+    // out while a part is being dragged.
+    const key = JSON.stringify(b) + (this.drag ? '|drag' : '');
+    if (this.connKey !== key) {
+      const nb0 = numericBoard(b, this.n);
+      this.connKey = key;
+      this.nb = this.drag ? { ...nb0, pours: [] } : nb0;
+      this.conn = connectivity(this.nb);
+    }
+    const nb = this.nb;
+    const conn = this.conn;
     const sel = String(selected || '');
     const traceColor = { top: c.top, bottom: c.bottom };
     for (const layer of [flip ? 'top' : 'bottom', flip ? 'bottom' : 'top']) {
       const far = layer !== (flip ? 'bottom' : 'top');
+      // Pours on this layer, as one path of row strips.
+      for (const pour of conn.pours || []) {
+        if (pour.layer !== layer) continue;
+        const st = pour.grid.step / 2;
+        const d = [];
+        for (const [x0, x1, y] of pour.grid.runs()) {
+          const a = P([x0, y + st]);
+          const z = P([x1, y - st]);
+          d.push(`M${Math.min(a[0], z[0]).toFixed(1)},${a[1].toFixed(1)}H${Math.max(a[0], z[0]).toFixed(1)}V${z[1].toFixed(1)}H${Math.min(a[0], z[0]).toFixed(1)}Z`);
+        }
+        out.push(`<path d="${d.join('')}" fill="${traceColor[layer]}" opacity="${far ? 0.12 : 0.26}" pointer-events="none"/>`);
+      }
       (nb.traces || []).forEach((t, i) => {
         if ((t.layer === 'bottom' ? 'bottom' : 'top') !== layer) return;
         const d = t.pts.map((p, k) => `${k ? 'L' : 'M'}${P(p)[0].toFixed(1)},${P(p)[1].toFixed(1)}`).join('');
@@ -261,8 +283,9 @@ export class BoardEditor {
     if (selTrace?.net) selNets.add(selTrace.net);
     if (selected && !sel.includes(':')) for (const net of b.nets || []) if ((net.pads || []).some(([r]) => r === selected)) selNets.add(net.name);
     if (this.route?.net) selNets.add(this.route.net);
-    const wires = airwires(nb, conn);
+    const wires = this.wiresKey === key ? this.wires : airwires(nb, conn);
     this.wires = wires;
+    this.wiresKey = key;
     const dim = [];
     const hot = [];
     for (const w of wires) {
@@ -274,7 +297,10 @@ export class BoardEditor {
     if (hot.length) out.push(`<path d="${hot.join('')}" stroke="${c.air}" stroke-width="2" fill="none" pointer-events="none"/>`);
     // Design-rule problems, once there is copper to check (not while dragging).
     if ((nb.traces || []).length || (nb.vias || []).length) {
-      if (!this.drag && !this.route) this.drcResult = drc(nb);
+      if (!this.drag && !this.route && this.drcKey !== key) {
+        this.drcResult = drc(nb);
+        this.drcKey = key;
+      }
       for (const i of this.drcResult?.issues || []) {
         const [x, y] = P(i.at);
         out.push(`<g pointer-events="none"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="none" stroke="${c.bad}" stroke-width="2"/><path d="M${x - 4},${y - 4}L${x + 4},${y + 4}M${x - 4},${y + 4}L${x + 4},${y - 4}" stroke="${c.bad}" stroke-width="2"/></g>`);
@@ -341,7 +367,7 @@ export class BoardEditor {
   copperAt(p, tol = 0) {
     const b = this.api.board();
     if (!b) return null;
-    const conn = connectivity(numericBoard(b, this.n));
+    const conn = this.conn && this.connKey === JSON.stringify(b) ? this.conn : connectivity(numericBoard(b, this.n));
     let best = null;
     for (const it of conn.items) {
       const s = it.shape;
@@ -630,10 +656,19 @@ export class BoardEditor {
     if (refs && !refs.length) return this.api.toast('Every part is already on the board.');
     let res = null;
     this.api.change((f) => {
-      res = autoPlace(f, this.n, { which: refs, sides });
+      res = arrangeBoard(f, this.n, { which: refs, sides });
     }, null);
-    if (res) this.api.toast(res.off.length ? `Placed ${res.placed} part${res.placed === 1 ? '' : 's'}; ${res.off.length} did not fit and wait beside the board (${res.off.join(', ')}).` : `Placed ${res.placed} part${res.placed === 1 ? '' : 's'}.`);
+    if (res) this.api.toast(res.off.length ? `Placed ${res.placed} part${res.placed === 1 ? '' : 's'}, connected parts near each other; ${res.off.length} did not fit and wait beside the board (${res.off.join(', ')}).` : `Placed ${res.placed} part${res.placed === 1 ? '' : 's'}, connected parts near each other.`);
     this.fit();
+  }
+
+  // Shorten the connections without starting over: nudge, turn and swap parts.
+  tidy() {
+    let res = null;
+    this.api.change((f) => {
+      res = improvePlacement(f, this.n);
+    }, null);
+    if (res) this.api.toast(res.moves ? `Moved, turned or swapped parts ${res.moves} times: connections ${res.before} → ${res.after} mm.` : 'No change found that shortens the connections without a clash.');
   }
 
   async autoroute(nets = null) {

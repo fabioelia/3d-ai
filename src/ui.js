@@ -637,7 +637,28 @@ function boardRows(f, setter) {
         row('Corner radius', exprInput({ id: 'board-r', label: 'Corner radius', unit: 'mm', def: 0, get: () => ol.r, set: (v) => oset('r', v) })),
       );
     }
-    out.push(...fieldRows(f, FEATURES.board.fields, setter, 'f'));
+    out.push(
+      h(
+        'div',
+        { class: 'insp-actions' },
+        h('button', {
+          class: 'btn small',
+          type: 'button',
+          title: 'Shape the board to the inside of the enclosure at the board\'s height, 1 mm clear of the wall',
+          onclick: async () => {
+            const at = (f.at || [0, 0, 0]).map(n);
+            try {
+              const res = await act.app.kernel.fitBoard({ at, th: n(f.thickness ?? 1.6), clearance: 1 });
+              editIn((x) => (x.outline = res.outline), null);
+              toast(res.outline.kind === 'circle' ? `The enclosure is ${fmt(res.wall.d, 2)} mm across inside at this height; the board is now ${fmt(res.outline.d, 2)} mm round.` : `The board now follows the inside of the enclosure, 1 mm clear of the wall (${res.outline.pts.length} points).`);
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+          },
+        }, 'Fit outline to enclosure'),
+      ),
+      ...fieldRows(f, FEATURES.board.fields, setter, 'f'),
+    );
     if (ol.kind === 'path') out.push(h('p', { class: 'insp-note' }, `Outline from ${f.source || 'the file'}, ${ol.pts.length} points. Switch to a rectangle or circle to size it here.`));
   }
 
@@ -693,6 +714,23 @@ function boardRows(f, setter) {
       row('Via', exprInput({ id: 'rule-via', label: 'Via pad', unit: 'mm', get: () => rules.via, set: (v) => rset('via', v) })),
       row('Via drill', exprInput({ id: 'rule-drill', label: 'Via drill', unit: 'mm', get: () => rules.drill, set: (v) => rset('drill', v) })),
     ),
+    ...(() => {
+      // Copper pours, one per layer: the net that fills the free space (usually GND).
+      const netNames = (f.nets || []).map((x) => x.name);
+      const guess = netNames.find((x) => /^(GND|VSS|0V|AGND|DGND)$/i.test(x)) || netNames.find((x) => /GND/i.test(x));
+      const opts = [['', 'None'], ...(guess ? [[guess, guess]] : []), ...netNames.filter((x) => x !== guess).map((x) => [x, x])];
+      const pourOf = (layer) => (f.pours || []).find((p) => p.layer === layer)?.net || '';
+      const setPour = (layer, net) =>
+        editIn((x) => {
+          x.pours = (x.pours || []).filter((p) => p.layer !== layer);
+          if (net) x.pours.push({ net, layer });
+          if (!x.pours.length) delete x.pours;
+        }, null);
+      return [
+        row('Top pour', selectInput({ id: 'pour-top', label: 'Top copper pour', options: opts, get: () => pourOf('top'), set: (v) => setPour('top', v) })),
+        row('Bottom pour', selectInput({ id: 'pour-bottom', label: 'Bottom copper pour', options: opts, get: () => pourOf('bottom'), set: (v) => setPour('bottom', v) }), 'fills the free copper with a net; a GND pour on the bottom saves most ground routing'),
+      ];
+    })(),
     drcList,
     h(
       'div',
@@ -730,7 +768,7 @@ function boardRows(f, setter) {
           try {
             const res = await act.app.kernel.interference({ board: f.id, clearance: 0.5 });
             fit.replaceChildren(
-              ...(res.bodies ? (res.issues.length ? res.issues.map((i) => h('li', { class: i.kind === 'collides' ? 'bi-overlap' : 'bi-edge' }, i.kind === 'collides' ? `${i.part} runs into ${i.body} (${fmt(i.volume, 1)} mm³ overlap).` : `${i.part} is ${fmt(i.distance, 2)} mm from ${i.body}.`)) : [h('li', { class: 'bi-ok' }, `Fits: no part touches or comes within 0.5 mm of ${res.bodies === 1 ? 'the other body' : `the ${res.bodies} other bodies`}.`)]) : [h('li', { class: 'bi-info' }, 'There is nothing else in the model to check against yet. Import or model the enclosure.')]),
+              ...(res.bodies ? (res.issues.length ? res.issues.map((i) => h('li', { class: i.kind === 'collides' ? 'bi-overlap' : 'bi-edge' }, i.kind === 'collides' ? `${i.part} runs into ${i.body} (${fmt(i.volume, 1)} mm³ overlap).` : i.distance === null ? `${i.part} comes within 0.5 mm of ${i.body} (measured on its box: the enclosure is a mesh).` : `${i.part} is ${fmt(i.distance, 2)} mm from ${i.body}.`)) : [h('li', { class: 'bi-ok' }, `Fits: no part touches or comes within 0.5 mm of ${res.bodies === 1 ? 'the other body' : `the ${res.bodies} other bodies`}.`)]) : [h('li', { class: 'bi-info' }, 'There is nothing else in the model to check against yet. Import or model the enclosure.')]),
             );
           } catch (e) {
             fit.replaceChildren(h('li', { class: 'bi-overlap' }, e.message));
@@ -787,7 +825,7 @@ function inspectorSignature() {
   // With nothing selected the inspector shows each body's size and volume, so those count too.
   const sizes = f ? '' : (store.results?.bodies || []).map((b) => `${b.name}:${b.min.concat(b.max).map((v) => v.toFixed(2)).join(',')}:${Math.round(b.volume)}`).join(';');
   // Boards: which part or hole is selected and the shape of what it has, not the values being typed.
-  const brd = f?.type === 'board' ? JSON.stringify([f.outline?.kind, (f.holes || []).length, (f.parts || []).map((p) => `${p.ref}${p.off ? '-' : ''}${p.side === 'bottom' ? 'b' : ''}${p.shape}`).join(), mode.kind === 'board' && mode.id === f.id, sel.shape && (f.parts || []).find((p) => p.ref === sel.shape) ? Object.keys((f.parts || []).find((p) => p.ref === sel.shape)).sort().join() : '']) : '';
+  const brd = f?.type === 'board' ? JSON.stringify([f.outline?.kind, f.pours, (f.holes || []).length, (f.parts || []).map((p) => `${p.ref}${p.off ? '-' : ''}${p.side === 'bottom' ? 'b' : ''}${p.shape}`).join(), mode.kind === 'board' && mode.id === f.id, sel.shape && (f.parts || []).find((p) => p.ref === sel.shape) ? Object.keys((f.parts || []).find((p) => p.ref === sel.shape)).sort().join() : '']) : '';
   return [brd, sizes, store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
 }
 
@@ -931,10 +969,12 @@ function renderModebar() {
         else if (v === 'top') ed.arrange('all', ['top']);
         else if (v === 'both') ed.arrange('all', ['top', 'bottom']);
         else if (v === 'route') ed.autoroute();
+        else if (v === 'tidy') ed.tidy();
         else if (v === 'unroute') ed.clearCopper();
       } },
       h('option', { value: '' }, 'Auto…'),
       h('option', { value: 'rest' }, 'Place the rest'),
+      h('option', { value: 'tidy' }, 'Tidy: shorter connections'),
       h('option', { value: 'top' }, 'Rearrange all, top side'),
       h('option', { value: 'both' }, 'Rearrange all, both sides'),
       h('option', { value: 'route' }, 'Autoroute what is left'),

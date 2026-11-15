@@ -8,6 +8,7 @@ import { boardPolygon } from '../board/geometry.js';
 import { partModel, DARK, METAL } from '../board/models.js';
 import { copperMesh } from '../board/copper3d.js';
 import { numericBoard } from '../board/route.js';
+import { sliceMesh, fitOutline as fitLoops } from '../board/fit.js';
 import { detectFormat, parseMesh, readSTEPSolid } from './formats.js';
 import { parseSTL, repairMesh, weldMesh, closedVolume, describeRepairs, meshToSTL, stlToSolid, stlToMesh, meshDisplay, meshTriangles, RawMesh, rawDisplay, SOLID_TRIANGLE_LIMIT } from './stl.js';
 
@@ -912,7 +913,7 @@ export function createKernel(r) {
           if (m.metal) bodies.push({ id: `${f.id}.${p.ref}.pins`, name: `${p.ref} pins`, shape: toBoard(m.metal), ...base, color: m.metalColor || METAL, detail: true });
         }
         if (f.copper !== false) {
-          const ck = JSON.stringify([nb.parts.filter((p) => !p.off).map((p) => [p.ref, p.x, p.y, p.rot, p.side, p.pads]), nb.traces, nb.vias, nb.nets, th]);
+          const ck = JSON.stringify([nb.parts.filter((p) => !p.off).map((p) => [p.ref, p.x, p.y, p.rot, p.side, p.pads]), nb.traces, nb.vias, nb.nets, nb.pours, nb.outline, nb.holes, nb.rules, th]);
           let mesh = copperCache.get(ck);
           if (!mesh) {
             const cm = copperMesh(nb, th);
@@ -1434,7 +1435,16 @@ export function createKernel(r) {
           out.push({ ...who, kind: 'collides', volume: rnd(vol) });
           continue;
         }
-        if (clearance > 0 && !isMesh(p.shape) && !isMesh(o.shape)) {
+        if (clearance > 0 && (isMesh(p.shape) || isMesh(o.shape))) {
+          // Meshes have no exact distance: test the part's box grown by the clearance instead.
+          try {
+            const grownBox = r.makeBox(grown.min, grown.max);
+            const x = boolean(grownBox, o.shape, 'intersect');
+            if (!isEmpty(x) && (isMesh(x) ? meshDisplay(x).volume : r.measureVolume(x)) > 1e-3) out.push({ ...who, kind: 'close', distance: null, approximate: true });
+          } catch {
+            /* no proximity for this pair */
+          }
+        } else if (clearance > 0) {
           try {
             const d = r.measureDistanceBetween(p.shape, o.shape);
             if (d < clearance) out.push({ ...who, kind: 'close', distance: rnd(d) });
@@ -1447,5 +1457,36 @@ export function createKernel(r) {
     return { parts: parts.length, bodies: others.length, issues: out };
   }
 
-  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference };
+  // The inside of the enclosure around a board: the other bodies cut at the board's bottom, middle
+  // and top, and the tightest outline that fits them all, `clearance` in from the wall.
+  function bodyTriangles(b) {
+    if (isRaw(b.shape)) return { vertices: b.shape.positions, triangles: b.shape.indices };
+    if (isMesh(b.shape)) return meshTriangles(b.shape);
+    const m = rawMesh(b.shape);
+    return { vertices: m.vertices, triangles: m.triangles };
+  }
+  function fitBoard({ at = [0, 0, 0], th = 1.6, center = null, clearance = 1, body = null } = {}) {
+    const others = lastState.bodies.filter((b) => !b.kind && (!body || b.id === body || b.name === body));
+    if (!others.length) throw new Error('There is no enclosure to fit the board into. Import or model it first.');
+    const c = center || [at[0], at[1]];
+    let best = null;
+    for (const z of [at[2] + 0.01, at[2] + th / 2, at[2] + th - 0.01]) {
+      const loops = [];
+      for (const b of others) {
+        const t = topo(b.shape);
+        if (z < t.min[2] || z > t.max[2]) continue;
+        const tri = bodyTriangles(b);
+        loops.push(...sliceMesh(tri.vertices, tri.triangles, z));
+      }
+      const fit = fitLoops(loops, c[0], c[1], clearance, [at[0], at[1]]);
+      if (!fit) continue;
+      const size = fit.outline.kind === 'circle' ? fit.outline.d : Math.abs(fit.outline.pts.reduce((a, p, i, arr) => a + p[0] * arr[(i + 1) % arr.length][1] - arr[(i + 1) % arr.length][0] * p[1], 0));
+      if (!best || size < best.size || best.outline.kind !== fit.outline.kind) best = { ...fit, size, z };
+    }
+    if (!best) throw new Error('No wall surrounds the board at its height. Move the board inside the enclosure (its Position), then try again.');
+    delete best.size;
+    return best;
+  }
+
+  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference, fitBoard };
 }

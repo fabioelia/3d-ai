@@ -2,7 +2,8 @@
 // the parts with their footprints (pads and body outline), the nets that join their pads and, for a
 // .brd, the board outline, holes and where every part sits.
 import { parseXML, kids, kid, path, walk } from './xml.js';
-import { guessPart, partColor, chainOutline, layoutNewBoard, boundingOutline } from './geometry.js';
+import { guessPart, partColor, chainOutline, boundingOutline } from './geometry.js';
+import { layoutNewBoard } from './placement.js';
 
 const BODY_LAYERS = { 51: 2, 21: 1, 39: 0 }; // tDocu (real body) beats tPlace (silkscreen) beats keepout
 const num = (v, d = 0) => (v === undefined || v === '' || Number.isNaN(+v) ? d : +v);

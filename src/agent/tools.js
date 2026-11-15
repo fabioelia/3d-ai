@@ -9,7 +9,8 @@ import { putFile, fromB64, toB64, embedFiles } from '../files.js';
 import { saveFile, safeName } from '../export.js';
 import { toolByName } from './catalog.js';
 import { evalExpr } from '../expr.js';
-import { checkBoard, autoPlace, overBoard, turnPart, flipPart, bodyCenter } from '../board/geometry.js';
+import { checkBoard, overBoard, turnPart, flipPart, bodyCenter } from '../board/geometry.js';
+import { arrangeBoard, improvePlacement } from '../board/placement.js';
 import { airwires, drc, numericBoard, rulesOf, copperLength } from '../board/route.js';
 import { fabFiles } from '../board/gerber.js';
 import { zip } from '../export.js';
@@ -526,6 +527,7 @@ function partRow(p) {
 IMPL.place_parts = async (args, ctx) => {
   await ready();
   const b = findBoard(args.board);
+  const arrangeAfterFit = !!(args.arrange && args.fit_outline);
   const problems = [];
   let arranged = null;
   const changed = update(
@@ -571,19 +573,35 @@ IMPL.place_parts = async (args, ctx) => {
           else p.off = true;
         }
       }
-      if (args.arrange) {
+      if (args.optimize && !args.arrange) arranged = improvePlacement(f, num, { fixed: args.keep || [] });
+      if (args.arrange && !args.fit_outline) {
         const which = args.arrange === 'rest' ? f.parts.filter((p) => p.off).map((p) => p.ref) : Array.isArray(args.arrange) ? args.arrange : null;
-        arranged = autoPlace(f, num, { which, sides: args.sides || ['top'], gap: args.gap ?? 1, margin: args.margin ?? 1 });
+        arranged = arrangeBoard(f, num, { which, sides: args.sides || ['top'], gap: args.gap ?? 1, margin: args.margin ?? 1 });
       }
     },
     { by: ctx.by },
   );
   const res = await act.app.rebuildNow();
   const err = res?.features?.[b.id]?.error;
+  let fitted = null;
+  if (args.fit_outline) {
+    const cur = featureById(b.id);
+    const o = args.fit_outline === true ? {} : args.fit_outline;
+    fitted = await act.app.kernel.fitBoard({ at: (cur.at || [0, 0, 0]).map(num), th: num(cur.thickness ?? 1.6), clearance: o.clearance ?? 1, body: o.body || null });
+    update((doc) => (doc.features.find((x) => x.id === b.id).outline = fitted.outline), { by: ctx.by });
+    if (arrangeAfterFit) {
+      update((doc) => {
+        const f = doc.features.find((x) => x.id === b.id);
+        arranged = arrangeBoard(f, num, { which: args.arrange === 'rest' ? f.parts.filter((p) => p.off).map((p) => p.ref) : Array.isArray(args.arrange) ? args.arrange : null, sides: args.sides || ['top'], gap: args.gap ?? 1, margin: args.margin ?? 1 });
+      }, { by: ctx.by });
+    }
+    await act.app.rebuildNow();
+  }
   const fresh = featureById(b.id);
   return ok(
     text({
       changed,
+      ...(fitted ? { fitted_outline: fitted.outline, ...(fitted.wall ? { enclosure_inside: fitted.wall } : {}), sliced_at_z: Math.round(fitted.z * 100) / 100 } : {}),
       ...(arranged ? { arranged } : {}),
       ...(problems.length ? { problems_with_request: problems } : {}),
       ...(err ? { error: err } : {}),
@@ -638,7 +656,14 @@ IMPL.route_board = async (args, ctx) => {
       f.traces = (f.traces || []).filter((_, i) => !tr.has(i));
       f.vias = (f.vias || []).filter((_, i) => !vi.has(i));
     }, { by: ctx.by });
-  } else if (action !== 'rules') return fail('action must be autoroute, add, remove, clear or rules.');
+  } else if (action === 'pour') {
+    const pours = (args.pours || []).filter((p) => p && p.net && (p.layer === 'top' || p.layer === 'bottom'));
+    update((doc) => {
+      const f = doc.features.find((x) => x.id === b.id);
+      if (pours.length) f.pours = pours.map((p) => ({ net: p.net, layer: p.layer, ...(p.clearance ? { clearance: p.clearance } : {}) }));
+      else delete f.pours;
+    }, { by: ctx.by });
+  } else if (action !== 'rules') return fail('action must be autoroute, add, remove, clear, pour or rules.');
   await act.app.rebuildNow();
   const fresh = featureById(b.id);
   const nb = numericBoard(fresh, num);
@@ -648,6 +673,7 @@ IMPL.route_board = async (args, ctx) => {
       ...(routed ? { autorouted: { routed: routed.routed, of: routed.total, new_traces: routed.traces.length, new_vias: routed.vias.length, failed: routed.failed.map((x) => `${x.net}: ${x.a} – ${x.b}`) } } : {}),
       traces: (nb.traces || []).length,
       vias: (nb.vias || []).length,
+      ...(nb.pours ? { pours: nb.pours } : {}),
       unrouted: res.airwires.map((w) => `${w.net}: ${w.a} – ${w.b}`),
       drc_errors: res.issues.slice(0, 40).map((i) => i.message),
       total_drc_errors: res.issues.length,
@@ -665,7 +691,7 @@ IMPL.check_board = async (args) => {
   out.problems = issues.map((i) => ({ kind: i.kind, parts: i.refs, message: i.message }));
   if (args.enclosure !== false) {
     const fit = await act.app.kernel.interference({ board: b.id, clearance: args.clearance ?? 0.5 });
-    out.enclosure = fit.bodies ? { checked_against: fit.bodies, issues: fit.issues.map((i) => (i.kind === 'collides' ? `${i.part} runs into ${i.body} (${i.bodyId}): ${i.volume} mm³ overlap.` : `${i.part} is ${i.distance} mm from ${i.body} (${i.bodyId}).`)) } : { note: 'No other bodies to check against (model or import the enclosure).' };
+    out.enclosure = fit.bodies ? { checked_against: fit.bodies, issues: fit.issues.map((i) => (i.kind === 'collides' ? `${i.part} runs into ${i.body} (${i.bodyId}): ${i.volume} mm³ overlap.` : i.distance === null ? `${i.part} comes within ${args.clearance ?? 0.5} mm of ${i.body} (${i.bodyId}) (approximate: the enclosure is a mesh, measured on the part's box).` : `${i.part} is ${i.distance} mm from ${i.body} (${i.bodyId}).`)) } : { note: 'No other bodies to check against (model or import the enclosure).' };
   }
   const nb = numericBoard(b, num);
   if ((nb.traces || []).length || (nb.vias || []).length) {

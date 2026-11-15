@@ -141,6 +141,18 @@ function overlap(a, b) {
   return true;
 }
 
+// Boxes of a part's through-hole pads on the board, grown by `grow`.
+export function pinBoxes(part, grow = 0) {
+  const out = [];
+  for (const pad of Object.values(part.pads || {})) {
+    if (pad.length >= 5) continue;
+    const c = toBoard(part, pad);
+    const r = (pad[2] || 1.6) / 2 + grow;
+    out.push([c[0] - r, c[1] - r, c[0] + r, c[1] + r]);
+  }
+  return out;
+}
+
 // Placement checks: parts that collide (same side, footprints overlap and heights overlap), parts off
 // the edge or too close to it, parts over mounting holes, parts not on the board yet.
 // Returns [{ kind, refs, message }].
@@ -159,6 +171,19 @@ export function checkBoard(board, n = Number, { edge = 0.5, holeClearance = 0.5 
       const zb = zRange(b, n);
       if (za[1] <= zb[0] + 1e-6 || zb[1] <= za[0] + 1e-6) continue; // one sits above the other
       if (overlap(polys[i], polys[j])) issues.push({ kind: 'overlap', refs: [a.ref, b.ref], message: `${a.ref} and ${b.ref} overlap on the ${a.side || 'top'} side.` });
+    }
+  // Through-hole pins come out on the other side of the board.
+  for (let i = 0; i < parts.length; i++)
+    for (let j = 0; j < parts.length; j++) {
+      const a = parts[i];
+      const b = parts[j];
+      if (i === j || (a.side || 'top') === (b.side || 'top') || n(b.lift ?? 0) >= 3) continue;
+      const pb = polys[j];
+      if (pinBoxes(a).some((bx) => {
+        const c = [(bx[0] + bx[2]) / 2, (bx[1] + bx[3]) / 2];
+        return pointInPolygon(c, pb) || distToPolyline(c, pb) < (bx[2] - bx[0]) / 2;
+      }))
+        issues.push({ kind: 'pins', refs: [a.ref, b.ref], message: `${a.ref}'s through-hole pins come out under ${b.ref} on the ${b.side || 'top'} side.` });
     }
   parts.forEach((p, i) => {
     if (polys[i].some((v) => !pointInPolygon(v, outline))) issues.push({ kind: 'outside', refs: [p.ref], message: `${p.ref} hangs over the edge of the board.` });
@@ -223,7 +248,8 @@ const aabb = (poly) => {
 // 90 degrees when that fits better), clear of the edge, the holes and each other. `which` picks the
 // parts to arrange (default: all); `sides` the sides to fill, in order. Parts that do not fit wait
 // beside the board with `off: true`. Mutates `board`; returns { placed, off }.
-export function autoPlace(board, n = Number, { which = null, sides = ['top'], gap = 1, margin = 1, step = 0.5 } = {}) {
+export function autoPlace(board, n = Number, opts = {}) {
+  const { which = null, sides = ['top'], gap = 1, margin = 1, step = 0.5 } = opts;
   const outline = boardPolygon(board, n);
   const bb = bounds(outline);
   const moving = (board.parts || []).filter((p) => !which || which.includes(p.ref));
@@ -250,16 +276,79 @@ export function autoPlace(board, n = Number, { which = null, sides = ['top'], ga
       [x1, (y0 + y1) / 2],
     ].every((v) => pointInPolygon(v, outline) && distToPolyline(v, outline) >= margin - 1e-9);
   const nearHole = ([x0, y0, x1, y1]) => holes.some((h) => Math.hypot(Math.max(x0 - h.c[0], 0, h.c[0] - x1), Math.max(y0 - h.c[1], 0, h.c[1] - y1)) < h.r);
+  // With `connect`, each part goes to the free spot closest to the parts it connects to that are
+  // already down, kept snug against its neighbours or the edge; otherwise rows, top left first.
+  const placedRefs = new Set(fixed.map((p) => p.ref));
+  const padsOf = (ref) => {
+    const q = (board.parts || []).find((x) => x.ref === ref);
+    return q ? Object.values(q.pads || {}).map((pd) => toBoard(q, pd)) : [];
+  };
+  const pullOf = (ref) => {
+    const pts = [];
+    for (const net of board.nets || []) {
+      if (!(net.pads || []).some(([r]) => r === ref)) continue;
+      for (const [r, pad] of net.pads) {
+        if (r === ref || !placedRefs.has(r)) continue;
+        const q = (board.parts || []).find((x) => x.ref === r);
+        if (q?.pads?.[pad]) pts.push(toBoard(q, q.pads[pad]));
+      }
+    }
+    return pts;
+  };
+  const nearConnections = (p, w0, d0, taken, clash, nearHole, inside, pinsClash) => {
+    const pull = pullOf(p.ref);
+    const cstep = Math.max(step, 1);
+    const hasNeighbours = taken.length > 0;
+    let best = null;
+    for (const turn of [0, 90]) {
+      const w = turn ? d0 : w0;
+      const d = turn ? w0 : d0;
+      for (let y = bb.y0 + margin; y + d <= bb.y1 - margin + 1e-9; y += cstep)
+        for (let x = bb.x0 + margin; x + w <= bb.x1 - margin + 1e-9; x += cstep) {
+          const r = [x, y, x + w, y + d];
+          if (clash(r) || nearHole(r) || !inside(r) || pinsClash(p, r, turn)) continue;
+          const c = [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
+          let wire = 0;
+          for (const q of pull) wire += Math.abs(q[0] - c[0]) + Math.abs(q[1] - c[1]);
+          // Snug against the parts already down (leaving the routing channel), starting at the centre.
+          let snug = hasNeighbours ? Infinity : 0;
+          for (const t of taken) snug = Math.min(snug, Math.max(t[0] - r[2], r[0] - t[2], t[1] - r[3], r[1] - t[3], 0) - chan);
+          const cost = wire + 2 * Math.max(0, snug) + Math.hypot(c[0] - bb.cx, c[1] - bb.cy) * (hasNeighbours || pull.length ? 0.05 : 1);
+          if (!best || cost < best.cost) best = { cost, r, turn, top: r[3] };
+        }
+    }
+    return best || false;
+  };
+  const connect = !!opts.connect && (board.nets || []).length > 0;
+  // Placed by connections, parts keep a wider gap: a channel for traces between them.
+  const chan = connect ? Math.max(gap, opts.channel ?? 2) : gap;
   let left = order;
   let placed = 0;
   for (const side of sides) {
     const taken = fixed.filter((p) => (p.side || 'top') === side).map((p) => aabb(footprintPolygon(p)));
-    const clash = (r) => taken.some((t) => r[0] < t[2] + gap - 1e-9 && t[0] < r[2] + gap - 1e-9 && r[1] < t[3] + gap - 1e-9 && t[1] < r[3] + gap - 1e-9);
+    // Through-hole pins go through the board: nothing on the other side may sit on them, and this
+    // part's own pins must not come through under a part on the other side.
+    const other = (board.parts || []).filter((p) => !p.off && (p.side || 'top') !== side && (fixed.includes(p) || placedRefs.has(p.ref)));
+    const otherPins = other.flatMap((p) => pinBoxes(p));
+    const otherBoxes = other.map((p) => aabb(footprintPolygon(p)));
+    const hit = (a, t, g) => a[0] < t[2] + g && t[0] < a[2] + g && a[1] < t[3] + g && t[1] < a[3] + g;
+    const clash = (r) => taken.some((t) => hit(r, t, chan - 1e-9)) || otherPins.some((t) => hit(r, t, 0.3));
+    const pinsClash = (p, r, turn) => {
+      if (!otherBoxes.length || !Object.values(p.pads || {}).some((pd) => pd.length < 5)) return false;
+      const keep = { x: p.x, y: p.y, rot: p.rot, side: p.side };
+      p.side = side;
+      p.rot = turn;
+      centerPartAt(p, (r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
+      const bad = pinBoxes(p).some((b) => otherBoxes.some((t) => hit(b, t, 0.3)));
+      Object.assign(p, keep);
+      return bad;
+    };
     const rest = [];
     for (const p of left) {
       const [w0, d0] = size(p);
-      let best = null;
-      for (const turn of w0 >= d0 ? [0, 90] : [90, 0]) {
+      let best = connect ? nearConnections(p, w0, d0, taken, clash, nearHole, inside, pinsClash) : null;
+      if (best === false) best = null;
+      for (const turn of best ? [] : w0 >= d0 ? [0, 90] : [90, 0]) {
         const w = turn ? d0 : w0;
         const d = turn ? w0 : d0;
         // Highest free row first, then leftmost; stop at the first row with room.
@@ -267,7 +356,7 @@ export function autoPlace(board, n = Number, { which = null, sides = ['top'], ga
           let hit = null;
           for (let x = bb.x0 + margin; x + w <= bb.x1 - margin + 1e-9; x += step) {
             const r = [x, top - d, x + w, top];
-            if (!clash(r) && !nearHole(r) && inside(r)) {
+            if (!clash(r) && !nearHole(r) && inside(r) && !pinsClash(p, r, turn)) {
               hit = r;
               break;
             }
@@ -287,6 +376,7 @@ export function autoPlace(board, n = Number, { which = null, sides = ['top'], ga
       centerPartAt(p, (best.r[0] + best.r[2]) / 2, (best.r[1] + best.r[3]) / 2);
       taken.push(best.r);
       delete p.off;
+      placedRefs.add(p.ref);
       placed++;
     }
     left = rest;
@@ -380,32 +470,24 @@ export function boundingOutline(parts) {
   return { kind: 'rect', w: Math.ceil(b.x1 - b.x0 + 2), h: Math.ceil(b.y1 - b.y0 + 2), r: 2, x: r3(b.cx), y: r3(b.cy) };
 }
 
-// Parts from a schematic or netlist have no places yet: arrange them on the given outline, or on a
-// rectangle drawn to fit them (grown until all fit, then trimmed to them). Returns a note.
-export function layoutNewBoard(out) {
-  const parts = out.parts;
-  const made = !out.outline;
-  if (made) {
-    const area = parts.reduce((sum, p) => {
-      const f = footprintBox(p);
-      return sum + (f.x1 - f.x0 + 2) * (f.y1 - f.y0 + 2);
-    }, 0) * 1.5;
-    const w = Math.max(20, Math.ceil(Math.sqrt(area * 1.33) / 5) * 5);
-    out.outline = { kind: 'rect', w, h: Math.max(15, Math.ceil(area / w / 5) * 5), r: 2 };
-  }
-  let res = autoPlace(out);
-  for (let i = 0; made && res.off.length && i < 12; i++) {
-    out.outline.w += 5;
-    out.outline.h += 5;
-    res = autoPlace(out);
-  }
-  if (made && !res.off.length) {
-    const o = boundingOutline(parts);
-    for (const p of parts) {
-      p.x = r3(p.x - o.x);
-      p.y = r3(p.y - o.y);
-    }
-    out.outline = { kind: 'rect', w: o.w, h: o.h, r: 2 };
-  }
-  return res.placed === parts.length ? `Arranged all ${parts.length} parts on the board (the file does not say where they go); drag them where you want them.` : `Arranged ${res.placed} of ${parts.length} parts on the board; the rest wait beside it until you drag them on.`;
+// A closed polygon moved inward by d (each corner along the bisector of its edges); for smooth or
+// convex outlines, which board outlines are. A negative d grows it.
+export function insetPolygon(poly, d) {
+  let area = 0;
+  for (let i = 0; i < poly.length; i++) area += poly[i][0] * poly[(i + 1) % poly.length][1] - poly[(i + 1) % poly.length][0] * poly[i][1];
+  const s = area > 0 ? -1 : 1;
+  const m = poly.length;
+  const unit = (v) => {
+    const l = Math.hypot(v[0], v[1]) || 1;
+    return [v[0] / l, v[1] / l];
+  };
+  return poly.map((b, i) => {
+    const a = poly[(i - 1 + m) % m];
+    const c = poly[(i + 1) % m];
+    const n1 = unit([b[1] - a[1], a[0] - b[0]]);
+    const n2 = unit([c[1] - b[1], b[0] - c[0]]);
+    const n = unit([n1[0] + n2[0], n1[1] + n2[1]]);
+    const cos = Math.max(0.3, n1[0] * n[0] + n1[1] * n[1]);
+    return [b[0] + (s * d * n[0]) / cos, b[1] + (s * d * n[1]) / cos];
+  });
 }

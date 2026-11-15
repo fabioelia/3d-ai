@@ -1,7 +1,8 @@
 // Fabrication files for a routed two-layer board: Gerber (RS-274X) copper, solder mask, silkscreen
 // and outline, and Excellon drill files, named the way KiCad names them so board houses recognise
 // them. Silkscreen carries part outlines only (no text).
-import { boardPolygon, partPolygon, toBoard } from './geometry.js';
+import { boardPolygon, partPolygon, toBoard, insetPolygon } from './geometry.js';
+import { connectivity, rulesOf } from './route.js';
 import { padShape } from './footprints.js';
 
 const MASK = 0.05; // solder mask opening beyond each pad
@@ -31,6 +32,9 @@ function gerber(name, fn) {
     }
   };
   const g = {
+    polarity(dark) {
+      body.push(dark ? '%LPD*%' : '%LPC*%');
+    },
     line(pts, w, closed = false) {
       if (pts.length < 2) return;
       use(w);
@@ -88,7 +92,29 @@ export function fabFiles(b, base = 'board') {
   const outline = boardPolygon(b);
   const parts = (b.parts || []).filter((p) => !p.off);
   const side = (p) => (p.side === 'bottom' ? 'bottom' : 'top');
+  // Pours: the board inset from its edge, with room cleared around other nets' copper and the
+  // holes (clear polarity), before the copper itself goes down.
+  const conn = (b.pours || []).length ? connectivity(b) : null;
+  const rules = rulesOf(b);
+  const pour = (layer) => (g) => {
+    for (const pr of b.pours || []) {
+      if (pr.layer !== layer) continue;
+      const clear = pr.clearance ?? Math.max(rules.clearance, 0.25);
+      g.region(insetPolygon(outline, rules.edge));
+      g.polarity(false);
+      for (const it of conn.items) {
+        if (!it.layers.includes(layer) || it.groupNet === pr.net) continue;
+        const s = it.shape;
+        if (s.poly) g.region(insetPolygon(s.poly, -clear));
+        else if (Math.hypot(s.a[0] - s.b[0], s.a[1] - s.b[1]) < 1e-9) g.flash(s.a, 2 * (s.r + clear));
+        else g.line([s.a, s.b], 2 * (s.r + clear));
+      }
+      for (const h of b.holes || []) g.flash([h.x, h.y], h.d + 2 * clear);
+      g.polarity(true);
+    }
+  };
   const copper = (layer, grow) => (g) => {
+    if (!grow) pour(layer)(g);
     for (const p of parts)
       for (const pad of Object.values(p.pads || {})) {
         const s = padShape(pad);

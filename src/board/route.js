@@ -137,20 +137,159 @@ export function connectivity(b, items = copperItems(b)) {
     if (A.kind === 'pad' && B.kind === 'pad' && A.ref === B.ref) return; // pads of one part only meet through copper
     if (shapeGap(A.shape, B.shape) <= 0.001) parent[find(index.get(A))] = find(index.get(B));
   });
-  const groups = new Map();
-  items.forEach((it, i) => {
-    const g = find(i);
-    it.group = g;
-    if (!groups.has(g)) groups.set(g, { items: [], nets: new Set() });
-    groups.get(g).items.push(it);
-    if (it.kind === 'pad' && it.net) groups.get(g).nets.add(it.net);
-  });
-  // Copper with no net of its own takes its group's.
-  for (const it of items) {
-    const nets = groups.get(it.group).nets;
-    it.groupNet = nets.size === 1 ? [...nets][0] : it.net;
+  const label = () => {
+    const groups = new Map();
+    items.forEach((it, i) => {
+      const g = find(i);
+      it.group = g;
+      if (!groups.has(g)) groups.set(g, { items: [], nets: new Set() });
+      groups.get(g).items.push(it);
+      if (it.kind === 'pad' && it.net) groups.get(g).nets.add(it.net);
+    });
+    // Copper with no net of its own takes its group's.
+    for (const it of items) {
+      const nets = groups.get(it.group).nets;
+      it.groupNet = nets.size === 1 ? [...nets][0] : it.net;
+    }
+    return groups;
+  };
+  let groups = label();
+  // Copper pours join the copper of their net that each separate area of the pour touches.
+  const pours = [];
+  for (const pour of b.pours || []) {
+    const grid = pourGrid(b, items, pour);
+    pours.push({ ...pour, grid });
+    const first = new Map(); // region -> item index
+    items.forEach((it, i) => {
+      if (it.groupNet !== pour.net || !it.layers.includes(pour.layer)) return;
+      for (const reg of grid.touching(it.shape)) {
+        if (first.has(reg)) parent[find(i)] = find(first.get(reg));
+        else first.set(reg, i);
+      }
+    });
   }
-  return { items, groups };
+  if (pours.length) groups = label();
+  return { items, groups, pours };
+}
+
+// A pour: the board on one layer, minus room around copper of other nets and the holes, kept off the
+// edge; as a grid of cells numbered by connected area (0 = no copper). Cached by what shapes it.
+const pourCache = new Map();
+export function pourGrid(b, items, pour) {
+  const rules = rulesOf(b);
+  const clear = pour.clearance ?? Math.max(rules.clearance, 0.25);
+  const step = pour.step || 0.2;
+  const others = items.filter((it) => it.layers.includes(pour.layer) && it.groupNet !== pour.net);
+  const key = JSON.stringify([b.outline, b.holes, pour, clear, step, rules.edge]) + others.map((it) => (it.shape.poly ? it.shape.poly.flat().join(',') : `${it.shape.a},${it.shape.b},${it.shape.r}`)).join(';');
+  if (pourCache.has(key)) return pourCache.get(key);
+  const outline = boardPolygon(b);
+  const bb = bounds(outline);
+  const x0 = bb.x0;
+  const y0 = bb.y0;
+  const nx = Math.ceil((bb.x1 - bb.x0) / step) + 1;
+  const ny = Math.ceil((bb.y1 - bb.y0) / step) + 1;
+  const cells = new Int32Array(nx * ny);
+  const cx = (i) => x0 + i * step;
+  const cy = (j) => y0 + j * step;
+  // Copper wherever the board is (row by row, between crossings of the outline)...
+  for (let j = 0; j < ny; j++) {
+    const y = cy(j);
+    const xs = [];
+    for (let k = 0; k < outline.length; k++) {
+      const a = outline[k];
+      const c = outline[(k + 1) % outline.length];
+      if (a[1] > y !== c[1] > y) xs.push(a[0] + ((y - a[1]) * (c[0] - a[0])) / (c[1] - a[1]));
+    }
+    xs.sort((p, q) => p - q);
+    for (let k = 0; k + 1 < xs.length; k += 2) for (let i = Math.max(0, Math.ceil((xs[k] - x0) / step)); i <= Math.min(nx - 1, Math.floor((xs[k + 1] - x0) / step)); i++) cells[j * nx + i] = -1;
+  }
+  // ...but not within the edge clearance of it.
+  for (let k = 0; k < outline.length; k++) {
+    const a = outline[k];
+    const c = outline[(k + 1) % outline.length];
+    const i0 = Math.max(0, Math.floor((Math.min(a[0], c[0]) - rules.edge - x0) / step));
+    const i1 = Math.min(nx - 1, Math.ceil((Math.max(a[0], c[0]) + rules.edge - x0) / step));
+    const j0 = Math.max(0, Math.floor((Math.min(a[1], c[1]) - rules.edge - y0) / step));
+    const j1 = Math.min(ny - 1, Math.ceil((Math.max(a[1], c[1]) + rules.edge - y0) / step));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) if (cells[j * nx + i] && ptSeg([cx(i), cy(j)], a, c) < rules.edge) cells[j * nx + i] = 0;
+  }
+  const knock = (shape, extra) => {
+    const box = shapeBox(shape);
+    const i0 = Math.max(0, Math.floor((box[0] - extra - x0) / step));
+    const i1 = Math.min(nx - 1, Math.ceil((box[2] + extra - x0) / step));
+    const j0 = Math.max(0, Math.floor((box[1] - extra - y0) / step));
+    const j1 = Math.min(ny - 1, Math.ceil((box[3] + extra - y0) / step));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) if (cells[j * nx + i] && pointGap([cx(i), cy(j)], shape) < extra) cells[j * nx + i] = 0;
+  };
+  for (const it of others) knock(it.shape, clear);
+  for (const h of b.holes || []) knock({ a: [h.x, h.y], b: [h.x, h.y], r: h.d / 2 }, clear);
+  // Number the connected areas (4-neighbour flood fill); drop slivers too small to matter.
+  let region = 0;
+  const stack = [];
+  const sizes = [0];
+  for (let c = 0; c < cells.length; c++) {
+    if (cells[c] !== -1) continue;
+    region++;
+    let size = 0;
+    cells[c] = region;
+    stack.push(c);
+    while (stack.length) {
+      const q = stack.pop();
+      size++;
+      const i = q % nx;
+      for (const nq of [i > 0 ? q - 1 : -1, i < nx - 1 ? q + 1 : -1, q - nx, q + nx]) {
+        if (nq < 0 || nq >= cells.length || cells[nq] !== -1) continue;
+        cells[nq] = region;
+        stack.push(nq);
+      }
+    }
+    sizes.push(size);
+  }
+  for (let c = 0; c < cells.length; c++) if (cells[c] > 0 && sizes[cells[c]] * step * step < 1) cells[c] = 0;
+  const grid = {
+    x0,
+    y0,
+    step,
+    nx,
+    ny,
+    cells,
+    net: pour.net,
+    layer: pour.layer,
+    // The areas a piece of copper overlaps.
+    touching(shape) {
+      const out = new Set();
+      const box = shapeBox(shape);
+      const i0 = Math.max(0, Math.floor((box[0] - x0) / step) - 1);
+      const i1 = Math.min(nx - 1, Math.ceil((box[2] - x0) / step) + 1);
+      const j0 = Math.max(0, Math.floor((box[1] - y0) / step) - 1);
+      const j1 = Math.min(ny - 1, Math.ceil((box[3] - y0) / step) + 1);
+      for (let j = j0; j <= j1; j++)
+        for (let i = i0; i <= i1; i++) {
+          const v = cells[j * nx + i];
+          if (v > 0 && pointGap([cx(i), cy(j)], shape) <= step * 0.75) out.add(v);
+        }
+      return out;
+    },
+    // Row runs of copper, for drawing: [[x0, x1, y], …].
+    runs() {
+      const out = [];
+      for (let j = 0; j < ny; j++) {
+        let start = -1;
+        for (let i = 0; i <= nx; i++) {
+          const on = i < nx && cells[j * nx + i] > 0;
+          if (on && start < 0) start = i;
+          if (!on && start >= 0) {
+            out.push([cx(start) - step / 2, cx(i - 1) + step / 2, cy(j)]);
+            start = -1;
+          }
+        }
+      }
+      return out;
+    },
+  };
+  if (pourCache.size > 12) pourCache.clear();
+  pourCache.set(key, grid);
+  return grid;
 }
 
 // Airwires: the connections each net still needs, joining its separate groups of copper by the
@@ -393,6 +532,8 @@ export function autoroute(src, opts = {}) {
   };
   const cellOf = (p) => [Math.round((p[0] - x0) / step), Math.round((p[1] - y0) / step)];
   const VIA_COST = opts.viaCost ?? 12;
+  // Keep other nets off a layer that carries a pour, so the pour stays whole.
+  const pourCost = [0, 1].map((l) => ((b.pours || []).some((p) => L(p.layer) === l) ? 1.8 : 1));
   const TURN = 0.4;
   // One connection: from the copper of group A to the copper of group B, both of net k.
   const search = (k, starts, goal, target) => {
@@ -442,7 +583,8 @@ export function autoroute(src, opts = {}) {
         if (d % 2 && (!free(layer, j * nx + ni, k) || !free(layer, nj * nx + i, k))) continue; // no corner cutting
         const turn = dir === 8 ? 0 : Math.min((d - dir + 8) % 8, (dir - d + 8) % 8);
         if (turn > 2) continue; // no hairpins
-        relax(layer * N + nc, (d % 2 ? 1.4142 : 1) + turn * TURN, ni, nj, d);
+        const pc = (b.pours || []).some((p) => L(p.layer) === layer && netIdx.get(p.net) === k) ? 1 : pourCost[layer];
+        relax(layer * N + nc, (d % 2 ? 1.4142 : 1) * pc + turn * TURN, ni, nj, d);
       }
       if (viaOk(i, j, k)) relax((1 - layer) * N + c, VIA_COST, i, j, 8);
     }
@@ -524,8 +666,21 @@ export function autoroute(src, opts = {}) {
   return { ...added, routed: order.length - failed.length, failed, total: order.length, grid: step };
 }
 
-// Route, and if some connections fail, try once more with those first; keep the better result.
+// Route, and if some connections fail, try once more with those first; keep the better result. With
+// copper pours, new traces can cut a pour into pieces; what that leaves unconnected is routed after.
 export function autorouteBest(b, opts = {}) {
+  let res = autorouteOnce(b, opts);
+  for (let pass = 0; pass < 2 && (b.pours || []).length; pass++) {
+    const next = { ...b, traces: [...(b.traces || []), ...res.traces], vias: [...(b.vias || []), ...res.vias] };
+    const more = autorouteOnce(next, opts);
+    if (!more.total) break;
+    res = { ...res, traces: [...res.traces, ...more.traces], vias: [...res.vias, ...more.vias], failed: more.failed, routed: Math.max(0, res.total - more.failed.length) };
+    if (!more.routed) break;
+  }
+  return res;
+}
+
+function autorouteOnce(b, opts = {}) {
   const first = autoroute(b, opts);
   if (!first.failed.length || opts.single) return first;
   const wires = airwires(b)

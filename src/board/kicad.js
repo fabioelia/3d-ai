@@ -7,7 +7,8 @@
 // KiCad's Y axis points down; Caliper's points up, so every Y is negated on the way in.
 import { parseSexpr, all, one, nums, str, prop, isList } from './sexpr.js';
 import { footprintFromName, fallbackFootprint, partFamily } from './footprints.js';
-import { guessPart, partColor, chainOutline, layoutNewBoard, boundingOutline } from './geometry.js';
+import { guessPart, partColor, chainOutline, boundingOutline } from './geometry.js';
+import { layoutNewBoard } from './placement.js';
 
 const r3 = (v) => Math.round(v * 1000) / 1000;
 const head = (bytes) => new TextDecoder().decode(bytes.subarray(0, 400)).trimStart();

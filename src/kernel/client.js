@@ -107,6 +107,10 @@ export class Kernel {
     return this.call('autoroute', { board, opts });
   }
 
+  fitBoard(opts) {
+    return this.call('fitboard', { opts });
+  }
+
   interference(opts) {
     return this.call('interference', { opts });
   }

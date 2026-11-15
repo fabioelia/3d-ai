@@ -89,7 +89,7 @@ function openBrowser(url) {
 const CLAUDE_BIN = process.env.CALIPER_CLAUDE_BIN || 'claude';
 // Bumped whenever the page needs something new from the bridge; pages tell the person to restart an
 // older bridge instead of silently missing features.
-const PROTOCOL = 4;
+const PROTOCOL = 5;
 const CHAT_PROMPT = `You are working inside Caliper, a browser CAD tool for 3D-printable parts, and the person is chatting with you from Caliper's side panel while looking at the model. Use the caliper tools to see and change what they have open (get_state and screenshot first). Reply in one to three short plain sentences: no markdown, no code, no JSON. Say what you changed and which parameters are worth tweaking.`;
 
 let chatInfo = null; // { available, version, reason }

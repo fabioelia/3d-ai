@@ -1,6 +1,6 @@
 // The copper of a board as a triangle mesh for the 3D view: pads, traces and vias as thin plates on
 // the two faces of the board. Display only (it never takes part in booleans).
-import { copperItems } from './route.js';
+import { connectivity } from './route.js';
 
 const T = 0.04; // drawn copper thickness, a little more than the real 35 µm so it shows
 
@@ -51,7 +51,21 @@ export function copperMesh(b, th) {
     cap(a, ang + Math.PI / 2);
     return out;
   };
-  for (const it of copperItems(b)) {
+  const conn = connectivity(b);
+  for (const pour of conn.pours || []) {
+    const st = pour.grid.step / 2;
+    for (const [x0, x1, y] of pour.grid.runs()) {
+      const poly = [
+        [x0, y - st],
+        [x1, y - st],
+        [x1, y + st],
+        [x0, y + st],
+      ];
+      if (pour.layer === 'top') prism(poly, th, th + T * 0.5);
+      else prism(poly, -T * 0.5, 0);
+    }
+  }
+  for (const it of conn.items) {
     const poly = it.shape.poly || stadium(it.shape.a, it.shape.b, it.shape.r);
     for (const layer of it.layers) {
       if (layer === 'top') prism(poly, th, th + T);

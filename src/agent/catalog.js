@@ -255,7 +255,7 @@ export const TOOLS = [
     name: 'place_parts',
     title: 'Place parts on a circuit board',
     description:
-      'Lay out a board feature (from an Eagle .sch/.brd or written by hand): move, turn, flip (top/bottom), lift, resize or take parts off the board; set the outline (rect {w,h,r}, circle {d}, or path {pts}), thickness, holes and where the board sits in 3D (at, rot); or let Caliper arrange parts automatically (arrange "all", "rest" or a list of refs; sides ["top"] or ["top","bottom"]). Parts that would hang off the board wait beside it with off: true. Coordinates are the board\'s own millimetres seen from the top (Eagle coordinates); a bottom part is mirrored. Returns the placement problems (overlaps, edge, holes, unplaced) and the airwire length to route.',
+      'Lay out a board feature (from an Eagle .sch/.brd or written by hand): move, turn, flip (top/bottom), lift, resize or take parts off the board; set the outline (rect {w,h,r}, circle {d}, or path {pts}), thickness, holes and where the board sits in 3D (at, rot); or let Caliper arrange parts automatically (arrange "all", "rest" or a list of refs; sides ["top"] or ["top","bottom"]; connected parts go near each other), or optimize the current layout for shorter connections. Parts that would hang off the board wait beside it with off: true. Coordinates are the board\'s own millimetres seen from the top (Eagle coordinates); a bottom part is mirrored. Returns the placement problems (overlaps, edge, holes, unplaced) and the airwire length to route.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -263,9 +263,12 @@ export const TOOLS = [
         parts: { type: 'array', items: PART_CHANGE },
         arrange: { description: '"all", "rest" (the parts not on the board) or a list of refs to place automatically, biggest first.', anyOf: [{ type: 'string', enum: ['all', 'rest'] }, { type: 'array', items: { type: 'string' } }] },
         sides: { type: 'array', items: { type: 'string', enum: ['top', 'bottom'] }, description: 'Sides to fill when arranging, in order (default ["top"]).' },
+        optimize: { type: 'boolean', description: 'Shorten the connections without rearranging: nudge parts toward what they connect to, turn and swap them where nothing clashes (parts in "keep" stay put).' },
+        keep: { type: 'array', items: { type: 'string' }, description: 'Refs that optimize must not move (connectors at the edge, a part you placed on purpose).' },
         gap: { type: 'number', default: 1, description: 'Space between parts when arranging (mm).' },
         margin: { type: 'number', default: 1, description: 'Space from the board edge when arranging (mm).' },
         outline: { type: 'object', description: '{"kind":"rect","w":60,"h":40,"r":2} or {"kind":"circle","d":58} or {"kind":"path","pts":[[x,y],…]}; x/y shift rect and circle.' },
+        fit_outline: { description: 'true, or {clearance, body}: shape the board to the inside of the enclosure (the other bodies) at the board\'s height, clearance mm (default 1) in from the wall. Runs after the other changes here (so set "at" in the same call), and before "arrange".', anyOf: [{ type: 'boolean' }, { type: 'object', properties: { clearance: { type: 'number' }, body: { type: 'string' } } }] },
         thickness: { type: ['number', 'string'] },
         holes: { type: 'array', items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, d: { type: 'number' } } }, description: 'Replaces all mounting holes.' },
         at: { ...vec3, description: 'Where the board origin sits in the model; its underside is at z.' },
@@ -277,12 +280,13 @@ export const TOOLS = [
     name: 'route_board',
     title: 'Route a circuit board',
     description:
-      'Copper for a board on two layers (top and bottom): autoroute what is not routed yet (optionally only some nets, at a width), add traces ({net, layer, w, pts:[[x,y],…]}) and vias ({x, y, d, drill, net}) by hand, remove traces/vias by index (from get_state or check_board), clear copper (all, or some nets), or set the design rules (trace, clearance, via, drill, edge, minTrace, minDrill in mm). Board coordinates, seen from the top. Returns what is still unrouted and the design-rule errors (clearance between nets, shorts, copper near the edge or holes, widths and drills).',
+      'Copper for a board on two layers (top and bottom): autoroute what is not routed yet (optionally only some nets, at a width), add traces ({net, layer, w, pts:[[x,y],…]}) and vias ({x, y, d, drill, net}) by hand, remove traces/vias by index (from get_state or check_board), clear copper (all, or some nets), add copper pours (a ground plane: pour GND on the bottom before autorouting), or set the design rules (trace, clearance, via, drill, edge, minTrace, minDrill in mm). Board coordinates, seen from the top. Returns what is still unrouted and the design-rule errors (clearance between nets, shorts, copper near the edge or holes, widths and drills).',
     inputSchema: {
       type: 'object',
       properties: {
         board: { type: 'string' },
-        action: { type: 'string', enum: ['autoroute', 'add', 'remove', 'clear', 'rules'], default: 'autoroute' },
+        action: { type: 'string', enum: ['autoroute', 'add', 'remove', 'clear', 'pour', 'rules'], default: 'autoroute' },
+        pours: { type: 'array', items: { type: 'object', properties: { net: { type: 'string' }, layer: { type: 'string', enum: ['top', 'bottom'] }, clearance: { type: 'number' } } }, description: 'With action "pour": the copper pours (replacing any), e.g. [{"net":"GND","layer":"bottom"}]; [] removes them. A pour fills the free copper of a layer with a net, joining every pad of that net it reaches; set it before autorouting.' },
         nets: { type: 'array', items: { type: 'string' }, description: 'Limit autoroute or clear to these nets.' },
         width: { type: 'number', description: 'Trace width for this autoroute (mm).' },
         traces: { type: 'array', items: { type: 'object' } },

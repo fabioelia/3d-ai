@@ -5,7 +5,8 @@ import { loadKernel } from './kernel-node.mjs';
 import { readKicad, isKicad } from '../src/board/kicad.js';
 import { readEagle } from '../src/board/eagle.js';
 import { footprintFromName, partFamily } from '../src/board/footprints.js';
-import { padPositions, boardPolygon } from '../src/board/geometry.js';
+import { padPositions, boardPolygon, autoPlace, checkBoard } from '../src/board/geometry.js';
+import { arrangeBoard, improvePlacement } from '../src/board/placement.js';
 import { airwires, connectivity, drc, autorouteBest, numericBoard } from '../src/board/route.js';
 import { fabFiles } from '../src/board/gerber.js';
 import { parseSexpr } from '../src/board/sexpr.js';
@@ -133,6 +134,83 @@ ok(near(U1.max[0] - U1.min[0], 10) && near(U1.max[2] - U1.min[2], 7) && !ids.inc
 brd.parts.find((p) => p.ref === 'U1').model = 'box';
 out = k.evaluate({ features: [brd] }).result;
 ok(out.bodies.find((b) => b.id === 'pcb.U1') && !out.bodies.some((b) => b.id === 'pcb.U1.dark'), 'or a plain block');
+
+// ---------- copper pours ----------
+const G = numericBoard(readEagle(fixture('demo.brd'), 'demo.brd').props);
+const before = airwires(G).filter((w) => w.net === 'GND').length;
+G.pours = [{ net: 'GND', layer: 'bottom' }];
+const pc = connectivity(G);
+const gnd = pc.items.filter((i) => i.kind === 'pad' && i.net === 'GND');
+const tht = gnd.filter((i) => i.layers.length === 2);
+const gw = airwires(G).filter((w) => w.net === 'GND');
+ok(before === 2 && tht.length === 2 && new Set(tht.map((i) => i.group)).size === 1, `a GND pour on the bottom joins the through-hole GND pads (${tht.map((i) => i.id)})`);
+ok(gw.length === 1 && [gw[0].a, gw[0].b].includes('Q1.2'), `a surface-mount GND pad on the top still needs a trace or via to reach it (${gw.map((w) => `${w.a}-${w.b}`)})`);
+ok(airwires(G).some((w) => w.net === 'VCC'), 'other nets still need routing');
+const grid = pc.pours[0].grid;
+const vccPad = pc.items.find((i) => i.id === 'U1.1');
+ok(grid.touching(vccPad.shape).size === 0, 'the pour keeps clear of other nets\' pads');
+const Gr = autorouteBest(G);
+G.traces = Gr.traces;
+G.vias = Gr.vias;
+res = drc(G);
+ok(Gr.failed.length === 0 && res.unrouted === 0 && res.issues.length === 0, `routing around the pour completes within the rules (${Gr.routed}/${Gr.total})`);
+const gb = fabFiles(G, 'demo').find((f) => f.name.endsWith('B_Cu.gbl')).data;
+ok(/%LPC\*%/.test(gb) && /%LPD\*%/.test(gb) && gb.indexOf('%LPC*%') < gb.lastIndexOf('%LPD*%'), 'the bottom Gerber pours, clears around other nets, then lays the copper');
+// A trace cutting the pour in two leaves pads on either side unjoined.
+const H = numericBoard(readEagle(fixture('demo.brd'), 'demo.brd').props);
+H.pours = [{ net: 'GND', layer: 'bottom' }];
+H.traces = [{ net: 'VCC', layer: 'bottom', w: 3, pts: [[25, -5], [25, 45]] }];
+ok(airwires(H).some((w) => w.net === 'GND'), 'a wide trace splitting the pour brings back the ground airwire');
+
+// ---------- placement that knows the circuit ----------
+// A chain: J1 - R1 - R2 - R3 - R4 - J2, set out in the wrong order.
+const chainParts = ['J1', 'R1', 'R2', 'R3', 'R4', 'J2'].map((ref, i) => ({ ref, package: 'R_AXIAL', x: 0, y: 0, rot: 0, side: 'top', h: 2.5, body: { cx: 5.08, cy: 0, w: 6, d: 2.5 }, pads: { 1: [0, 0, 1.6, 0.8], 2: [10.16, 0, 1.6, 0.8] } }));
+const chainNets = chainParts.slice(1).map((p, i) => ({ name: `N${i}`, pads: [[chainParts[i].ref, '2'], [p.ref, '1']] }));
+const chain = { outline: { kind: 'rect', w: 60, h: 40 }, parts: chainParts, nets: chainNets };
+const hp = (b) => b.nets.reduce((sum, net) => {
+  const pts = net.pads.map(([ref, pad]) => padPositions(b)[`${ref}.${pad}`]);
+  return sum + Math.max(...pts.map((q) => q[0])) - Math.min(...pts.map((q) => q[0])) + Math.max(...pts.map((q) => q[1])) - Math.min(...pts.map((q) => q[1]));
+}, 0);
+const shelf = structuredClone(chain);
+autoPlace(shelf);
+// Scramble the order so rows put neighbours apart.
+const scrambled = structuredClone(chain);
+scrambled.parts = [scrambled.parts[0], scrambled.parts[3], scrambled.parts[5], scrambled.parts[1], scrambled.parts[4], scrambled.parts[2]];
+autoPlace(scrambled);
+const before2 = hp(scrambled);
+const imp = improvePlacement(scrambled);
+ok(imp.after < imp.before && hp(scrambled) < before2 && checkBoard(scrambled).length === 0, `tidying shortens connections without clashes (${Math.round(before2)} → ${Math.round(hp(scrambled))} mm, ${imp.moves} moves)`);
+const smart = structuredClone(chain);
+const ar = arrangeBoard(smart);
+ok(ar.placed === 6 && checkBoard(smart).length === 0 && hp(smart) <= hp(shelf) + 1e-6, `arranging puts connected parts together (${Math.round(hp(smart))} mm vs ${Math.round(hp(shelf))} mm in rows)`);
+// Through-hole pins come out under the board: nothing on the other side may sit on them.
+const two = { outline: { kind: 'rect', w: 14, h: 6 }, parts: [structuredClone(chainParts[0]), { ...structuredClone(chainParts[1]), ref: 'B1' }], nets: [] };
+autoPlace(two, Number, { sides: ['top', 'bottom'] });
+ok(two.parts.every((p) => !p.off) && two.parts[0].side !== two.parts[1].side ? checkBoard(two).length === 0 : true, `parts on opposite sides keep off each other's pins (${checkBoard(two).map((i) => i.message)})`);
+const stacked = { outline: { kind: 'rect', w: 30, h: 20 }, parts: [{ ...structuredClone(chainParts[0]), x: -5 }, { ...structuredClone(chainParts[1]), x: -5, side: 'bottom' }], nets: [] };
+stacked.parts[1].x = 5.08 - 5 + 0; // mirrored on the bottom: its pads land on the top part's pads
+ok(checkBoard(stacked).some((i) => i.kind === 'pins'), `a bottom part over a top part's pins is reported (${checkBoard(stacked).map((i) => i.message)})`);
+
+// ---------- fitting a board into an enclosure ----------
+const tube = [
+  { id: 'can', type: 'cylinder', d: 66, h: 50, op: 'new' },
+  { id: 'bore', type: 'cylinder', d: 62, h: 52, at: [0, 0, 2], op: 'cut' },
+];
+k.evaluate({ features: [...tube, { id: 'pcb', type: 'board', outline: { kind: 'rect', w: 30, h: 30 }, at: [0, 0, 20], parts: [], nets: [] }] });
+let fit = k.fitBoard({ at: [0, 0, 20], th: 1.6, clearance: 1 });
+ok(fit.outline.kind === 'circle' && near(fit.outline.d, 60, 0.15) && near(fit.wall.d, 62, 0.15), `a round enclosure gives a round board, 1 mm clear of the wall (${JSON.stringify(fit)})`);
+k.evaluate({ features: [{ id: 'boxy', type: 'box', w: 50, d: 30, h: 40, op: 'new' }, { id: 'pocket', type: 'box', w: 46, d: 26, h: 40, at: [0, 0, 3], op: 'cut' }] });
+fit = k.fitBoard({ at: [5, 0, 10], th: 1.6, clearance: 1 });
+const fx = fit.outline.pts.map((p) => p[0]);
+const fy = fit.outline.pts.map((p) => p[1]);
+ok(fit.outline.kind === 'path' && near(Math.max(...fx) - Math.min(...fx), 44, 0.05) && near(Math.max(...fy) - Math.min(...fy), 24, 0.05) && near(Math.min(...fx), -27, 0.05), `a box gives an outline 1 mm inside its walls, in board coordinates (${Math.min(...fx)}..${Math.max(...fx)} × ${Math.min(...fy)}..${Math.max(...fy)})`);
+let threw2 = '';
+try {
+  k.fitBoard({ at: [100, 0, 10], th: 1.6 });
+} catch (e) {
+  threw2 = e.message;
+}
+ok(/No wall surrounds/.test(threw2), 'a board outside the enclosure is explained');
 
 console.log(failed ? `\n${failed} PCB check(s) failed` : '\nAll PCB checks passed');
 process.exit(failed ? 1 : 0);
