@@ -25,6 +25,7 @@ const PART_CHANGE = {
     value: { type: 'string' },
     color: { type: 'string' },
     add: { type: 'boolean', description: 'Create the part as a plain block if it does not exist.' },
+    model: { description: '3D model: "auto" (drawn from the footprint), "box" (plain block), or {rot:[x,y,z], at:[x,y,z], units} to adjust a model file set with import_file board_part.', anyOf: [{ type: 'string', enum: ['auto', 'box'] }, { type: 'object' }] },
     remove: { type: 'boolean' },
   },
   required: ['ref'],
@@ -146,11 +147,13 @@ export const TOOLS = [
     name: 'import_file',
     title: 'Import a 3D file or a circuit board',
     description:
-      'Bring a file from the local disk into the model. Eagle / Fusion Electronics schematics (.sch) and boards (.brd) become a board feature: every part with its footprint, pads, body size and an estimated height, the nets (shown as airwires), and for a .brd the outline, holes and placement; a schematic gets its parts arranged on a board drawn to fit. 3D files become Import features: STL, STEP/STP, OBJ or 3MF, or a .zip of them (as model sites deliver). STEP files with real surfaces come in as exact solids. Meshes (STL, OBJ, 3MF, and STEP files that only hold a mesh, as Fusion\'s tessellated export does) are repaired, then small clean ones become exact solids whose flat faces can be sketched on, filleted and shelled, larger ones mesh bodies (moved, joined, cut, patterned), and ones that still are not closed reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
+      'Bring a file from the local disk into the model. Circuit files become a board feature: Eagle / Fusion Electronics .sch and .brd, KiCad .kicad_pcb, .kicad_sch and .net. Every part comes with its footprint (pads, body, an estimated height; KiCad schematics and netlists get footprints from their standard library names), the nets (airwires), and for a board file also the outline, holes, placement and copper (tracks, vias); a schematic or netlist gets its parts arranged on a board drawn to fit. With board_part, a STEP/STL file becomes the 3D model of that part. 3D files become Import features: STL, STEP/STP, OBJ or 3MF, or a .zip of them (as model sites deliver). STEP files with real surfaces come in as exact solids. Meshes (STL, OBJ, 3MF, and STEP files that only hold a mesh, as Fusion\'s tessellated export does) are repaired, then small clean ones become exact solids whose flat faces can be sketched on, filleted and shelled, larger ones mesh bodies (moved, joined, cut, patterned), and ones that still are not closed reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Path to the .stl, .step, .stp, .obj, .3mf, .sch, .brd or .zip file on this computer.' },
+        path: { type: 'string', description: 'Path to the .stl, .step, .stp, .obj, .3mf, .sch, .brd, .kicad_pcb, .kicad_sch, .net or .zip file on this computer.' },
+        board_part: { type: 'string', description: 'Use this STEP/STL/OBJ/3MF file as the 3D model of one board part (its ref, e.g. "U4") instead of importing it as a body. With "board" when there are several boards; rot/at/units adjust it.' },
+        board: { type: 'string' },
         name: { type: 'string', description: 'Name for the part in the timeline (single file only).' },
         mode: { type: 'string', enum: ['auto', 'solid', 'mesh'], default: 'auto' },
         units: { type: 'string', enum: ['mm', 'cm', 'm', 'in'], default: 'mm' },
@@ -235,12 +238,12 @@ export const TOOLS = [
     name: 'export_file',
     title: 'Export a file',
     description:
-      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), or eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor. Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
+      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor; or gerber: a zip of Gerber copper, mask, silkscreen and outline layers plus Excellon drill files for a board house (the note warns about unrouted connections and design-rule errors). Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
     inputSchema: {
       type: 'object',
       properties: {
-        format: { type: 'string', enum: ['stl', 'step', 'project', 'eagle_script'] },
-        board: { type: 'string', description: 'With eagle_script: which board (default: the open or only one).' },
+        format: { type: 'string', enum: ['stl', 'step', 'project', 'eagle_script', 'gerber'] },
+        board: { type: 'string', description: 'With eagle_script or gerber: which board (default: the open or only one).' },
         path: { type: 'string' },
         quality: { type: 'string', enum: ['draft', 'standard', 'fine'], default: 'standard' },
         bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids to include (default: all).' },
@@ -271,10 +274,30 @@ export const TOOLS = [
     },
   },
   {
+    name: 'route_board',
+    title: 'Route a circuit board',
+    description:
+      'Copper for a board on two layers (top and bottom): autoroute what is not routed yet (optionally only some nets, at a width), add traces ({net, layer, w, pts:[[x,y],…]}) and vias ({x, y, d, drill, net}) by hand, remove traces/vias by index (from get_state or check_board), clear copper (all, or some nets), or set the design rules (trace, clearance, via, drill, edge, minTrace, minDrill in mm). Board coordinates, seen from the top. Returns what is still unrouted and the design-rule errors (clearance between nets, shorts, copper near the edge or holes, widths and drills).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        board: { type: 'string' },
+        action: { type: 'string', enum: ['autoroute', 'add', 'remove', 'clear', 'rules'], default: 'autoroute' },
+        nets: { type: 'array', items: { type: 'string' }, description: 'Limit autoroute or clear to these nets.' },
+        width: { type: 'number', description: 'Trace width for this autoroute (mm).' },
+        traces: { type: 'array', items: { type: 'object' } },
+        vias: { type: 'array', items: { type: 'object' } },
+        remove_traces: { type: 'array', items: { type: 'integer' } },
+        remove_vias: { type: 'array', items: { type: 'integer' } },
+        rules: { type: 'object', description: '{ "trace": 0.25, "clearance": 0.2, "via": 0.6, "drill": 0.3, "edge": 0.3, "minTrace": 0.15, "minDrill": 0.3 }' },
+      },
+    },
+  },
+  {
     name: 'check_board',
     title: 'Check a board layout',
     description:
-      'Placement check for a board: parts that collide (same side, footprints overlap and heights overlap), hang off the edge or come too close to it, sit over mounting holes, or are not on the board; then a 3D check of every part and the board against the other bodies (the enclosure): collisions with overlap volume and anything closer than `clearance`. Also the longest nets by airwire length and every part with its position, side and size.',
+      'Placement and copper check for a board: design-rule errors and unrouted connections when it has copper, parts that collide (same side, footprints overlap and heights overlap), hang off the edge or come too close to it, sit over mounting holes, or are not on the board; then a 3D check of every part and the board against the other bodies (the enclosure): collisions with overlap volume and anything closer than `clearance`. Also the longest nets by airwire length and every part with its position, side and size.',
     inputSchema: {
       type: 'object',
       properties: {

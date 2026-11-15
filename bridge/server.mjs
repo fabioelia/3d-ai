@@ -89,7 +89,7 @@ function openBrowser(url) {
 const CLAUDE_BIN = process.env.CALIPER_CLAUDE_BIN || 'claude';
 // Bumped whenever the page needs something new from the bridge; pages tell the person to restart an
 // older bridge instead of silently missing features.
-const PROTOCOL = 3;
+const PROTOCOL = 4;
 const CHAT_PROMPT = `You are working inside Caliper, a browser CAD tool for 3D-printable parts, and the person is chatting with you from Caliper's side panel while looking at the model. Use the caliper tools to see and change what they have open (get_state and screenshot first). Reply in one to three short plain sentences: no markdown, no code, no JSON. Say what you changed and which parameters are worth tweaking.`;
 
 let chatInfo = null; // { available, version, reason }
@@ -627,7 +627,7 @@ async function handleMcp(req, res, hub, sessions) {
 }
 
 // ---------- the MCP server an agent talks to ----------
-const INSTRUCTIONS = `Caliper is a browser CAD tool for 3D-printable parts, open in the person's browser. These tools let you see exactly what they see (get_state, screenshot), work on the same model they are editing (edit_model, set_model, import_file), lay out circuit boards from Eagle / Fusion Electronics files (place_parts, check_board), point at things (select, set_view, ask_user) and export files to this computer (export_file). Start with open_caliper if Caliper is not connected, then get_state. Look with screenshot after each change.
+const INSTRUCTIONS = `Caliper is a browser CAD tool for 3D-printable parts, open in the person's browser. These tools let you see exactly what they see (get_state, screenshot), work on the same model they are editing (edit_model, set_model, import_file), lay out and route circuit boards from Eagle, Fusion Electronics or KiCad files (place_parts, route_board, check_board), point at things (select, set_view, ask_user) and export files to this computer (export_file). Start with open_caliper if Caliper is not connected, then get_state. Look with screenshot after each change.
 
 ${GUIDE}`;
 
@@ -684,12 +684,12 @@ function createMcpServer(getBackend, key) {
       }
       if (!TOOLS.some((t) => t.name === name)) return text(`Unknown tool "${name}".`, true);
       if (name === 'import_file') {
-        if (!args.path) return text('import_file needs a path to a 3D file (STL, STEP, OBJ, 3MF or zip) or an Eagle .sch / .brd.', true);
+        if (!args.path) return text('import_file needs a path to a 3D file (STL, STEP, OBJ, 3MF or zip) or an Eagle / KiCad board, schematic or netlist.', true);
         const file = path.resolve(process.cwd(), String(args.path).replace(/^~(?=$|\/)/, os.homedir()));
         if (!fs.existsSync(file)) return text(`There is no file at ${file}.`, true);
         const size = fs.statSync(file).size;
         if (size > 200 * 1024 * 1024) return text(`${file} is larger than 200 MB.`, true);
-        if (!/\.(stl|step|stp|obj|3mf|zip|sch|brd)$/i.test(file)) return text(`${path.basename(file)} is not a file Caliper imports (STL, STEP, OBJ, 3MF, Eagle .sch or .brd, or a zip of them).`, true);
+        if (!/\.(stl|step|stp|obj|3mf|zip|sch|brd|kicad_pcb|kicad_sch|net)$/i.test(file)) return text(`${path.basename(file)} is not a file Caliper imports (STL, STEP, OBJ, 3MF, an Eagle or KiCad board, schematic or netlist, or a zip of them).`, true);
         args.data = fs.readFileSync(file).toString('base64');
         args.fileName = path.basename(file);
         delete args.path;

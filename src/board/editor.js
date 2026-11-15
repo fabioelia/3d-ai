@@ -1,8 +1,11 @@
 // The board placement editor: a top-down 2D view of the board over the 3D view, where parts are
 // dragged into place, turned and flipped, with airwires showing what connects to what and clashes
-// drawn in red as they happen (like the board editor in Fusion or Eagle, without the routing).
+// drawn in red as they happen, and copper routing: traces on two layers, vias, an autorouter and
+// design-rule checks (like the board editor in Fusion, Eagle or KiCad).
 import { evalExpr } from '../expr.js';
-import { boardPolygon, partPolygon, footprintPolygon, toBoard, airwires, checkBoard, boardExtent, overBoard, turnPart, flipPart, autoPlace, bodyCenter } from './geometry.js';
+import { boardPolygon, partPolygon, footprintPolygon, toBoard, checkBoard, boardExtent, overBoard, turnPart, flipPart, autoPlace, bodyCenter } from './geometry.js';
+import { airwires, connectivity, drc, copperItems, numericBoard, rulesOf, ptSeg } from './route.js';
+import { pointInPolygon } from '../sketchgeo.js';
 
 export const GRIDS = [0.1, 0.25, 0.5, 1, 1.27, 2.54, 5];
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -26,6 +29,9 @@ export class BoardEditor {
     this.grid = 0.5;
     this.drag = null;
     this.work = null;
+    this.layer = 'top'; // the copper layer the route tool draws on
+    this.route = null; // a trace being drawn: { net, layer, w, pts, done: { traces, vias } }
+    this.cursor = null;
     this.el = document.createElement('div');
     this.el.className = 'board-editor';
     this.el.hidden = true;
@@ -42,7 +48,8 @@ export class BoardEditor {
     this.el.addEventListener('pointercancel', (e) => this.up(e));
     this.el.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
     this.el.addEventListener('dblclick', (e) => {
-      if (!e.target.closest('[data-ref]')) this.fit();
+      if (this.route) return this.finishRoute();
+      if (!e.target.closest('[data-ref]') && !e.target.closest('[data-trace]')) this.fit();
     });
     this.el.addEventListener('contextmenu', (e) => e.preventDefault());
     new ResizeObserver(() => this.active && this.render()).observe(this.el);
@@ -64,13 +71,17 @@ export class BoardEditor {
     this.active = true;
     this.el.hidden = false;
     this.readColors();
-    if (!this.view) this.fit(false);
+    if (!this.view || this.viewFor !== this.api.board()?.id) {
+      this.viewFor = this.api.board()?.id;
+      this.fit(false);
+    }
     this.render();
     this.el.focus({ preventScroll: true });
   }
 
   exit() {
     this.active = false;
+    this.route = null;
     this.drag = null;
     this.work = null;
     this.el.hidden = true;
@@ -92,6 +103,8 @@ export class BoardEditor {
       text: cssColor(el, '--bd-text', '#f2f5f7'),
       partEdge: cssColor(el, '--bd-part-edge', 'rgba(255,255,255,0.55)'),
       hole: cssColor(el, '--bd-hole', '#0b0f13'),
+      top: cssColor(el, '--bd-top', '#d0503f'),
+      bottom: cssColor(el, '--bd-bottom', '#4a7fd6'),
     };
   }
 
@@ -132,10 +145,19 @@ export class BoardEditor {
     if (!this.active) return;
     const b = this.board();
     if (!b) return;
+    if (this.viewFor !== b.id) {
+      // Another board: frame it.
+      this.viewFor = b.id;
+      this.route = null;
+      this.fit(false);
+    }
     this.svgHost.innerHTML = this.svg(b, this.view, this.size(), this.flip, this.api.selected());
     const placed = (b.parts || []).filter((p) => !p.off).length;
     const issues = this.issues.filter((i) => i.kind !== 'unplaced');
-    this.chip.innerHTML = `<b>${placed}/${(b.parts || []).length}</b> parts on the board · ${issues.length ? `<span class="bad">${issues.length} problem${issues.length === 1 ? '' : 's'}</span>` : 'no clashes'} · viewed from ${this.flip ? 'below' : 'above'} · grid ${this.grid} mm`;
+    const rules = this.drcResult;
+    const copper = rules ? ` · ${rules.unrouted ? `${rules.unrouted} to route` : 'all routed'}${rules.issues.length ? ` · <span class="bad">${rules.issues.length} DRC error${rules.issues.length === 1 ? '' : 's'}</span>` : (b.traces || []).length ? ' · DRC clean' : ''}` : '';
+    const routing = this.route ? ` · routing ${esc(this.route.net || 'a trace')} on the ${this.route.layer} (V: via, Backspace: undo point, double-click: finish, Esc: cancel)` : this.api.tool() === 'route' ? ` · click a pad to start a trace on the ${this.layer}` : '';
+    this.chip.innerHTML = `<b>${placed}/${(b.parts || []).length}</b> parts on the board · ${issues.length ? `<span class="bad">${issues.length} problem${issues.length === 1 ? '' : 's'}</span>` : 'no clashes'}${copper} · from ${this.flip ? 'below' : 'above'} · grid ${this.grid} mm${routing}`;
   }
 
   svg(b, view, size, flip, selected, { forShot = false } = {}) {
@@ -213,10 +235,33 @@ export class BoardEditor {
       const [lx, ly] = P(bodyCenter(p));
       if (!far) labels.push(`<text x="${lx.toFixed(1)}" y="${(ly + fs * 0.35).toFixed(1)}" font-size="${fs.toFixed(1)}" font-weight="600" text-anchor="middle" fill="${c.text}" stroke="rgba(0,0,0,0.55)" stroke-width="2.5" paint-order="stroke" pointer-events="none">${esc(p.ref)}</text>`);
     }
+    // Copper: the far layer faint, then vias, then the near layer.
+    const nb = numericBoard(b, this.n);
+    const conn = connectivity(nb);
+    const sel = String(selected || '');
+    const traceColor = { top: c.top, bottom: c.bottom };
+    for (const layer of [flip ? 'top' : 'bottom', flip ? 'bottom' : 'top']) {
+      const far = layer !== (flip ? 'bottom' : 'top');
+      (nb.traces || []).forEach((t, i) => {
+        if ((t.layer === 'bottom' ? 'bottom' : 'top') !== layer) return;
+        const d = t.pts.map((p, k) => `${k ? 'L' : 'M'}${P(p)[0].toFixed(1)},${P(p)[1].toFixed(1)}`).join('');
+        const isSel = sel === `trace:${i}`;
+        out.push(`<g data-trace="${i}" style="cursor:pointer"><path d="${d}" stroke="${isSel ? c.sel : traceColor[layer]}" stroke-width="${Math.max(1, (t.w || 0.25) * view.s).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="${far ? 0.45 : 0.9}"/><path d="${d}" stroke="transparent" stroke-width="${Math.max(8, (t.w || 0.25) * view.s).toFixed(1)}" fill="none"/></g>`);
+      });
+      if (!far) continue;
+      (nb.vias || []).forEach((v, i) => {
+        const [x, y] = P([v.x, v.y]);
+        const isSel = sel === `via:${i}`;
+        out.push(`<g data-via="${i}" style="cursor:pointer"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${Math.max(2, ((v.d || 0.6) / 2) * view.s).toFixed(1)}" fill="${isSel ? c.sel : c.pad}"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${Math.max(0.8, ((v.drill || 0.3) / 2) * view.s).toFixed(1)}" fill="${c.hole}"/></g>`);
+      });
+    }
     // Airwires, brighter for the selected part's nets.
     const selNets = new Set();
-    if (selected && !String(selected).startsWith('hole:')) for (const net of b.nets || []) if ((net.pads || []).some(([r]) => r === selected)) selNets.add(net.name);
-    const wires = airwires(b);
+    const selTrace = sel.startsWith('trace:') ? nb.traces?.[+sel.slice(6)] : null;
+    if (selTrace?.net) selNets.add(selTrace.net);
+    if (selected && !sel.includes(':')) for (const net of b.nets || []) if ((net.pads || []).some(([r]) => r === selected)) selNets.add(net.name);
+    if (this.route?.net) selNets.add(this.route.net);
+    const wires = airwires(nb, conn);
     this.wires = wires;
     const dim = [];
     const hot = [];
@@ -227,10 +272,29 @@ export class BoardEditor {
     }
     out.push(`<path d="${dim.join('')}" stroke="${c.air}" stroke-width="0.8" opacity="${selNets.size ? 0.3 : 0.7}" fill="none" pointer-events="none"/>`);
     if (hot.length) out.push(`<path d="${hot.join('')}" stroke="${c.air}" stroke-width="2" fill="none" pointer-events="none"/>`);
+    // Design-rule problems, once there is copper to check (not while dragging).
+    if ((nb.traces || []).length || (nb.vias || []).length) {
+      if (!this.drag && !this.route) this.drcResult = drc(nb);
+      for (const i of this.drcResult?.issues || []) {
+        const [x, y] = P(i.at);
+        out.push(`<g pointer-events="none"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="none" stroke="${c.bad}" stroke-width="2"/><path d="M${x - 4},${y - 4}L${x + 4},${y + 4}M${x - 4},${y + 4}L${x + 4},${y - 4}" stroke="${c.bad}" stroke-width="2"/></g>`);
+      }
+    } else this.drcResult = { issues: [], unrouted: wires.filter((w) => !w.offBoard).length };
+    // The trace being drawn.
+    if (this.route && !forShot) {
+      const r = this.route;
+      const pts = r.pts.concat(this.cursor ? [this.angled(r.pts[r.pts.length - 1], this.cursor)] : []);
+      for (const t of r.done.traces) out.push(`<path d="${t.pts.map((p, k) => `${k ? 'L' : 'M'}${P(p)[0].toFixed(1)},${P(p)[1].toFixed(1)}`).join('')}" stroke="${traceColor[t.layer]}" stroke-width="${Math.max(1, t.w * view.s).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.9" pointer-events="none"/>`);
+      if (pts.length > 1) out.push(`<path d="${pts.map((p, k) => `${k ? 'L' : 'M'}${P(p)[0].toFixed(1)},${P(p)[1].toFixed(1)}`).join('')}" stroke="${traceColor[r.layer]}" stroke-width="${Math.max(1, r.w * view.s).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.75" stroke-dasharray="${Math.max(2, r.w * view.s * 2)} ${Math.max(2, r.w * view.s)}" pointer-events="none"/>`);
+      for (const v of r.done.vias) {
+        const [x, y] = P([v.x, v.y]);
+        out.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${Math.max(2, (v.d / 2) * view.s).toFixed(1)}" fill="${c.pad}" pointer-events="none"/>`);
+      }
+    }
     out.push(...labels);
     if (forShot) {
       const placed = (b.parts || []).filter((p) => !p.off).length;
-      out.push(`<text x="12" y="22" font-size="14" fill="${c.text}">${esc(b.name || 'Board')}: ${placed}/${(b.parts || []).length} parts placed, viewed from ${flip ? 'below' : 'above'}. ${issues.filter((i) => i.kind !== 'unplaced').length} problems.</text>`);
+      out.push(`<text x="12" y="22" font-size="14" fill="${c.text}">${esc(b.name || 'Board')}: ${placed}/${(b.parts || []).length} parts placed, viewed from ${flip ? 'below' : 'above'}. ${issues.filter((i) => i.kind !== 'unplaced').length} placement problems, ${this.drcResult?.unrouted ?? 0} connections to route, ${this.drcResult?.issues.length ?? 0} DRC errors. Red: top copper, blue: bottom.</text>`);
     }
     out.push('</svg>');
     return out.join('');
@@ -262,14 +326,131 @@ export class BoardEditor {
     return r3(Math.round(v / this.grid) * this.grid);
   }
 
+  // ---------- routing ----------
+  // From `from` toward `to`, held to a multiple of 45 degrees.
+  angled(from, to) {
+    const dx = to[0] - from[0];
+    const dy = to[1] - from[1];
+    if (!dx && !dy) return from.slice();
+    const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+    const len = dx * Math.cos(a) + dy * Math.sin(a);
+    return [r3(from[0] + Math.cos(a) * len), r3(from[1] + Math.sin(a) * len)];
+  }
+
+  // The copper under a board point: a pad first, then a via, then a trace.
+  copperAt(p, tol = 0) {
+    const b = this.api.board();
+    if (!b) return null;
+    const conn = connectivity(numericBoard(b, this.n));
+    let best = null;
+    for (const it of conn.items) {
+      const s = it.shape;
+      const gap = s.poly ? (pointInPolygon(p, s.poly) ? -1 : Infinity) : ptSeg(p, s.a, s.b) - s.r;
+      if (gap > tol) continue;
+      const rank = { pad: 0, via: 1, trace: 2 }[it.kind];
+      if (!best || rank < best.rank || (rank === best.rank && gap < best.gap)) best = { it, rank, gap };
+    }
+    if (!best) return null;
+    const it = best.it;
+    let at = it.at;
+    if (it.kind === 'trace') {
+      // The nearest point on the segment.
+      const [a, c] = [it.shape.a, it.shape.b];
+      const dx = c[0] - a[0];
+      const dy = c[1] - a[1];
+      const l2 = dx * dx + dy * dy || 1e-12;
+      const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2));
+      at = [r3(a[0] + t * dx), r3(a[1] + t * dy)];
+    }
+    return { item: it, kind: it.kind, net: it.groupNet || it.net || null, at: [r3(at[0]), r3(at[1])], layers: it.layers, id: it.id };
+  }
+
+  startRoute(p) {
+    const hit = this.copperAt(p, 3 / this.view.s);
+    if (!hit) {
+      this.api.toast('Start a trace on a pad, a via or the end of a trace.');
+      return;
+    }
+    const rules = rulesOf(this.api.board());
+    const layer = hit.layers.includes(this.layer) ? this.layer : hit.layers[0];
+    this.route = { net: hit.net, layer, w: rules.trace, pts: [hit.at], done: { traces: [], vias: [] }, from: hit.id };
+    this.render();
+  }
+
+  routeClick(p, e) {
+    const r = this.route;
+    const last = r.pts[r.pts.length - 1];
+    const hit = this.copperAt(p, 3 / this.view.s);
+    if (hit && hit.id !== r.from && hit.layers.includes(r.layer) && (hit.net === r.net || !r.net || !hit.net)) {
+      const elbow = this.angled(last, hit.at);
+      if (Math.hypot(elbow[0] - hit.at[0], elbow[1] - hit.at[1]) > 1e-6 && Math.hypot(elbow[0] - last[0], elbow[1] - last[1]) > 1e-6) r.pts.push(elbow);
+      r.pts.push(hit.at);
+      r.net ||= hit.net;
+      this.finishRoute();
+      return;
+    }
+    if (hit && hit.net && r.net && hit.net !== r.net && hit.kind !== 'trace') {
+      this.api.toast(`That ${hit.kind} is on ${hit.net}; this trace is ${r.net}.`);
+      return;
+    }
+    const q = this.angled(last, [this.snap(p[0], e), this.snap(p[1], e)]);
+    if (Math.hypot(q[0] - last[0], q[1] - last[1]) < 1e-6) return;
+    r.pts.push(q);
+    r.from = null;
+    this.render();
+  }
+
+  // Drop a via at the last point and carry on on the other layer.
+  routeVia() {
+    const r = this.route;
+    if (!r) return false;
+    const rules = rulesOf(this.api.board());
+    const last = r.pts[r.pts.length - 1];
+    if (r.pts.length >= 2) r.done.traces.push({ net: r.net, layer: r.layer, w: r.w, pts: r.pts.slice() });
+    r.done.vias.push({ x: last[0], y: last[1], d: rules.via, drill: Math.max(rules.drill, rules.minDrill), net: r.net });
+    r.layer = r.layer === 'top' ? 'bottom' : 'top';
+    this.layer = r.layer;
+    r.pts = [last];
+    this.render();
+    return true;
+  }
+
+  finishRoute() {
+    const r = this.route;
+    if (!r) return;
+    this.route = null;
+    if (r.pts.length >= 2) r.done.traces.push({ net: r.net, layer: r.layer, w: r.w, pts: r.pts });
+    if (!r.done.traces.length && !r.done.vias.length) return this.render();
+    this.api.change((f) => {
+      f.traces = [...(f.traces || []), ...r.done.traces];
+      if (r.done.vias.length) f.vias = [...(f.vias || []), ...r.done.vias];
+    }, null);
+  }
+
+  cancelRoute() {
+    this.route = null;
+    this.render();
+  }
+
   down(e) {
     this.el.focus({ preventScroll: true });
     const b = this.api.board();
     if (!b) return;
     const partEl = e.target.closest?.('[data-ref]');
     const holeEl = e.target.closest?.('[data-hole]');
+    const traceEl = e.target.closest?.('[data-trace]');
+    const viaEl = e.target.closest?.('[data-via]');
     const at = this.fromS(e.clientX, e.clientY);
+    if (e.button === 0 && this.api.tool() === 'route') {
+      if (this.route) this.routeClick(at, e);
+      else this.startRoute(at);
+      return;
+    }
     this.el.setPointerCapture(e.pointerId);
+    if (e.button === 0 && this.api.tool() === 'select' && !partEl && (traceEl || viaEl)) {
+      this.api.select(traceEl ? `trace:${traceEl.dataset.trace}` : `via:${viaEl.dataset.via}`);
+      return;
+    }
     if (e.button === 0 && this.api.tool() === 'hole' && !partEl) {
       const hole = { x: this.snap(at[0], e), y: this.snap(at[1], e), d: this.lastHole || 3.2 };
       this.api.change((f) => (f.holes = [...(f.holes || []), hole]), null);
@@ -290,6 +471,14 @@ export class BoardEditor {
 
   move(e) {
     const d = this.drag;
+    if (this.route && !d) {
+      const p = this.fromS(e.clientX, e.clientY);
+      this.cursor = [this.snap(p[0], e), this.snap(p[1], e)];
+      const hit = this.copperAt(p, 3 / this.view.s);
+      this.api.hover(`${this.route.net || 'trace'} on the ${this.route.layer} · x ${f1(this.cursor[0])} y ${f1(this.cursor[1])}${hit ? ` · over ${hit.kind === 'pad' ? `pad ${hit.id}` : `a ${hit.kind}`}${hit.net ? ` (${hit.net})` : ''}` : ''}`);
+      this.render();
+      return;
+    }
     if (!d) {
       const partEl = e.target.closest?.('[data-ref]');
       const b = this.api.board();
@@ -369,12 +558,12 @@ export class BoardEditor {
   // ---------- commands ----------
   selectedPart() {
     const ref = this.api.selected();
-    return ref && !String(ref).startsWith('hole:') ? this.api.board()?.parts.find((p) => p.ref === ref) || null : null;
+    return ref && !String(ref).includes(':') ? this.api.board()?.parts.find((p) => p.ref === ref) || null : null;
   }
 
   editPart(fn) {
     const ref = this.api.selected();
-    if (!ref || String(ref).startsWith('hole:')) {
+    if (!ref || String(ref).includes(':')) {
       this.api.toast('Select a part first: click it on the board.');
       return false;
     }
@@ -395,6 +584,12 @@ export class BoardEditor {
 
   takeOff() {
     const ref = this.api.selected();
+    if (ref && /^(trace|via):/.test(String(ref))) {
+      const [kind, i] = String(ref).split(':');
+      this.api.change((f) => (kind === 'trace' ? f.traces : f.vias)?.splice(+i, 1), null);
+      this.api.select(null);
+      return;
+    }
     if (ref && String(ref).startsWith('hole:')) {
       const i = +ref.slice(5);
       this.api.change((f) => f.holes.splice(i, 1), null);
@@ -441,6 +636,50 @@ export class BoardEditor {
     this.fit();
   }
 
+  async autoroute(nets = null) {
+    const b = this.api.board();
+    if (!b) return null;
+    if (!(b.nets || []).length) {
+      this.api.toast('This board has no nets to route. Import a schematic or board file with its connections.');
+      return null;
+    }
+    this.busy = true;
+    this.api.toast('Routing…');
+    let res;
+    try {
+      res = await this.api.autoroute(numericBoard(b, this.n), nets ? { nets } : {});
+    } catch (e) {
+      this.busy = false;
+      this.api.toast(`The autorouter stopped: ${e.message}`);
+      return null;
+    }
+    this.busy = false;
+    if (res.traces.length || res.vias.length)
+      this.api.change((f) => {
+        f.traces = [...(f.traces || []), ...res.traces];
+        f.vias = [...(f.vias || []), ...res.vias];
+      }, null);
+    this.api.toast(
+      res.total === 0
+        ? 'Every connection is already routed.'
+        : `Routed ${res.routed} of ${res.total} connections with ${res.vias.length} via${res.vias.length === 1 ? '' : 's'}${res.failed.length ? `; ${res.failed.length} could not be routed (${[...new Set(res.failed.map((x) => x.net))].join(', ')}): move parts apart, or route them by hand` : ''}.`,
+    );
+    return res;
+  }
+
+  clearCopper() {
+    this.api.change((f) => {
+      f.traces = [];
+      f.vias = [];
+    }, null);
+  }
+
+  setLayer(layer) {
+    this.layer = layer;
+    if (this.route && this.route.layer !== layer) this.routeVia();
+    this.render();
+  }
+
   setFlip(v) {
     this.flip = v;
     this.render();
@@ -454,6 +693,22 @@ export class BoardEditor {
   key(e) {
     if (!this.active) return false;
     const k = e.key;
+    if (this.route) {
+      if (k === 'Escape') this.cancelRoute();
+      else if (k === 'v' || k === 'V') this.routeVia();
+      else if (k === 'Enter') this.finishRoute();
+      else if (k === 'Backspace' || k === 'Delete') {
+        if (this.route.pts.length > 1) this.route.pts.pop();
+        else this.cancelRoute();
+        this.render();
+      } else if (k === 'w' || k === 'W') this.route.w = this.route.w >= 1 ? 0.25 : Math.round((this.route.w + 0.25) * 100) / 100;
+      else return false;
+      return true;
+    }
+    if (k === 'x' || k === 'X') {
+      this.api.setTool(this.api.tool() === 'route' ? 'select' : 'route');
+      return true;
+    }
     const step = (e.shiftKey ? 10 : 1) * (e.altKey ? 0.1 : this.grid || 0.5);
     if (k === 'r' || k === 'R') this.rotate(e.shiftKey ? -90 : 90);
     else if (k === 'f' || k === 'F') this.flipSide();

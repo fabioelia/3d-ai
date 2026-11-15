@@ -134,7 +134,7 @@ ok(fs.existsSync(proj) && Object.keys(JSON.parse(fs.readFileSync(proj, 'utf8')).
 fs.copyFileSync(new URL('./fixtures/demo.brd', import.meta.url), path.join(work, 'demo.brd'));
 r = await A.call('import_file', { path: 'demo.brd' });
 st = json(r);
-ok(!r.isError && st.ok && st.bodies.some((b) => /circuit board/.test(b.kind)) && st.bodies.filter((b) => /board part/.test(b.kind)).length === 4, `import_file brings in an Eagle board: ${textOf(r).slice(0, 160)}`);
+ok(!r.isError && st.ok && st.bodies.some((b) => /circuit board/.test(b.kind)) && st.bodies.filter((b) => /board part/.test(b.kind) && !/\.(pins|dark)$/.test(b.id)).length === 4, `import_file brings in an Eagle board: ${textOf(r).slice(0, 160)}`);
 const boardId = st.added?.[0];
 r = await A.call('place_parts', { board: boardId, parts: [{ ref: 'U1', lift: 8.5 }, { ref: 'Q1', center: [12, 30] }], holes: [{ x: 4, y: 4, d: 3.2 }, { x: 46, y: 4, d: 3.2 }, { x: 4, y: 36, d: 3.2 }] });
 st = json(r);
@@ -149,6 +149,18 @@ r = await A.call('screenshot', { view: 'board', board: boardId, size: 'small' })
 const boardImg = r.content.find((c) => c.type === 'image');
 ok(boardImg && boardImg.data.length > 5000 && /airwires/.test(textOf({ content: r.content.filter((c) => c.type === 'text') })), 'screenshot shows the board placement view');
 if (boardImg) fs.writeFileSync(path.join(shots, 'bridge-board.png'), Buffer.from(boardImg.data, 'base64'));
+r = await A.call('route_board', { board: boardId, action: 'autoroute' });
+st = json(r);
+ok(!r.isError && st.autorouted?.routed === st.autorouted?.of && st.unrouted.length === 0 && st.total_drc_errors === 0, `route_board autoroutes within the design rules: ${textOf(r).slice(0, 160)}`);
+r = await A.call('export_file', { format: 'gerber', board: boardId, path: 'out/demo-gerbers.zip' });
+ok(!r.isError && fs.statSync(path.join(work, 'out/demo-gerbers.zip')).size > 1000 && !/WARNING/.test(textOf(r)), `export_file writes Gerbers: ${textOf(r).slice(0, 140)}`);
+fs.copyFileSync(new URL('./fixtures/demo.kicad_pcb', import.meta.url), path.join(work, 'demo.kicad_pcb'));
+r = await A.call('import_file', { path: 'demo.kicad_pcb' });
+st = json(r);
+ok(!r.isError && st.added?.length === 1, `import_file reads a KiCad board: ${textOf(r).slice(0, 120)}`);
+r = await A.call('check_board', { board: st.added[0], parts: false });
+ok(json(r).drc && json(r).drc.unrouted.length === 1, `check_board reports a KiCad board's copper: ${textOf(r).slice(0, 160)}`);
+await A.call('edit_model', { remove: [st.added[0]] });
 r = await A.call('export_file', { format: 'eagle_script', board: boardId, path: 'out/demo.scr' });
 ok(!r.isError && /MOVE U1/.test(fs.readFileSync(path.join(work, 'out/demo.scr'), 'utf8')), 'export_file writes an Eagle placement script');
 r = await A.call('export_file', { format: 'stl', path: 'out/clip2.stl' });

@@ -1,9 +1,9 @@
 {
   "name": "caliper",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Browser CAD for 3D-printable parts, with a Claude assistant",
   "scripts": {
-    "test": "node scripts/test-kernel.mjs && node scripts/test-import.mjs && node scripts/test-board.mjs",
+    "test": "node scripts/test-kernel.mjs && node scripts/test-import.mjs && node scripts/test-board.mjs && node scripts/test-pcb.mjs",
     "dev": "node scripts/prepare-kernel.mjs && vite",
     "preview": "vite preview",
     "artifact": "npm run bundle && node scripts/make-artifact.mjs",

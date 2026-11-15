@@ -2,7 +2,7 @@
 // the parts with their footprints (pads and body outline), the nets that join their pads and, for a
 // .brd, the board outline, holes and where every part sits.
 import { parseXML, kids, kid, path, walk } from './xml.js';
-import { guessPart, autoPlace, partColor, footprintPolygon } from './geometry.js';
+import { guessPart, partColor, chainOutline, layoutNewBoard, boundingOutline } from './geometry.js';
 
 const BODY_LAYERS = { 51: 2, 21: 1, 39: 0 }; // tDocu (real body) beats tPlace (silkscreen) beats keepout
 const num = (v, d = 0) => (v === undefined || v === '' || Number.isNaN(+v) ? d : +v);
@@ -26,8 +26,9 @@ function readPackage(pkg) {
   const pts = [];
   let smd = false;
   for (const p of kids(pkg, 'pad')) {
-    const d = num(p.attrs.diameter) || num(p.attrs.drill, 0.8) * 1.6 + 0.2;
-    pads[p.attrs.name] = [round(num(p.attrs.x)), round(num(p.attrs.y)), round(d, 100)];
+    const drill = num(p.attrs.drill, 0.8);
+    const d = num(p.attrs.diameter) || drill * 1.6 + 0.2;
+    pads[p.attrs.name] = [round(num(p.attrs.x)), round(num(p.attrs.y)), round(d, 100), round(drill, 100)];
     pts.push([num(p.attrs.x) - d / 2, num(p.attrs.y) - d / 2], [num(p.attrs.x) + d / 2, num(p.attrs.y) + d / 2]);
   }
   for (const p of kids(pkg, 'smd')) {
@@ -137,33 +138,11 @@ function makePart(ref, pkgName, pkgEl, value, descs, extra = {}) {
 function boardOutline(plain) {
   const circle = kids(plain, 'circle').find((c) => c.attrs.layer === '20');
   if (circle) return { outline: { kind: 'circle', d: round(num(circle.attrs.radius) * 2, 100), x: round(num(circle.attrs.x)), y: round(num(circle.attrs.y)) } };
-  const wires = kids(plain, 'wire')
+  const segs = kids(plain, 'wire')
     .filter((w) => w.attrs.layer === '20')
-    .map((w) => ({ a: [num(w.attrs.x1), num(w.attrs.y1)], b: [num(w.attrs.x2), num(w.attrs.y2)], curve: num(w.attrs.curve) }));
-  if (wires.length < 2) return null;
-  const same = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 0.01;
-  const chain = [wires.shift()];
-  while (wires.length) {
-    const end = chain[chain.length - 1].b;
-    const i = wires.findIndex((w) => same(w.a, end) || same(w.b, end));
-    if (i < 0) break;
-    const w = wires.splice(i, 1)[0];
-    chain.push(same(w.a, end) ? w : { a: w.b, b: w.a, curve: -w.curve });
-  }
-  // Each point carries the bulge of the segment that ends at it (as Caliper paths do); the last
-  // segment ends where the first starts, so it goes first.
-  const pts = chain.map((w) => [round(w.b[0]), round(w.b[1]), w.curve ? round(Math.tan((w.curve * Math.PI) / 180 / 4), 10000) : 0]);
-  pts.unshift(pts.pop());
-  const xs = pts.map((p) => p[0]);
-  const ys = pts.map((p) => p[1]);
-  const w = Math.max(...xs) - Math.min(...xs);
-  const hgt = Math.max(...ys) - Math.min(...ys);
-  const rectish = pts.length === 4 && pts.every((p) => !p[2]) && pts.every((p, i) => {
-    const q = pts[(i + 1) % 4];
-    return Math.abs(p[0] - q[0]) < 1e-3 || Math.abs(p[1] - q[1]) < 1e-3;
-  });
-  if (rectish) return { outline: { kind: 'rect', w: round(w, 100), h: round(hgt, 100), x: round(Math.min(...xs) + w / 2), y: round(Math.min(...ys) + hgt / 2) } };
-  return { outline: { kind: 'path', pts } };
+    .map((w) => ({ a: [num(w.attrs.x1), num(w.attrs.y1)], b: [num(w.attrs.x2), num(w.attrs.y2)], bulge: num(w.attrs.curve) ? Math.tan((num(w.attrs.curve) * Math.PI) / 180 / 4) : 0 }));
+  const outline = chainOutline(segs);
+  return outline ? { outline } : null;
 }
 
 // Parse an Eagle .sch or .brd. Returns the props of a board feature plus notes for the person.
@@ -239,38 +218,8 @@ export function readEagle(bytes, fileName = 'board') {
   if (!parts.length) throw new Error(`${fileName} has no parts with footprints.`);
   out.parts = parts;
   out.nets = nets;
-  const made = !out.outline;
-  if (made) {
-    // A rectangle with room for everything on one side, rounded up to 5 mm.
-    const area = parts.reduce((sum, p) => sum + (p.body.w + 2) * (p.body.d + 2), 0) * 1.5;
-    const w = Math.max(20, Math.ceil(Math.sqrt(area * 1.33) / 5) * 5);
-    out.outline = { kind: 'rect', w, h: Math.max(15, Math.ceil(area / w / 5) * 5), r: 2 };
-  }
-  if (!board) {
-    let res = autoPlace(out);
-    // A board Caliper drew grows until everything fits.
-    for (let i = 0; made && res.off.length && i < 12; i++) {
-      out.outline.w += 5;
-      out.outline.h += 5;
-      res = autoPlace(out);
-    }
-    if (made && !res.off.length) {
-      // Trim the board Caliper drew to the parts, keeping the 1 mm margin, and centre it on 0, 0.
-      const pts = parts.flatMap((p) => footprintPolygon(p));
-      const x0 = Math.min(...pts.map((q) => q[0])) - 1;
-      const x1 = Math.max(...pts.map((q) => q[0])) + 1;
-      const y0 = Math.min(...pts.map((q) => q[1])) - 1;
-      const y1 = Math.max(...pts.map((q) => q[1])) + 1;
-      const cx = (x0 + x1) / 2;
-      const cy = (y0 + y1) / 2;
-      for (const p of parts) {
-        p.x = round(p.x - cx);
-        p.y = round(p.y - cy);
-      }
-      out.outline = { kind: 'rect', w: Math.ceil(x1 - x0), h: Math.ceil(y1 - y0), r: 2 };
-    }
-    notes.push(res.placed === parts.length ? `Arranged all ${parts.length} parts on the board; drag them where you want them.` : `Arranged ${res.placed} of ${parts.length} parts on the board; the rest wait beside it until you drag them on.`);
-  }
+  if (!board) notes.push(layoutNewBoard(out));
+  else if (!out.outline) out.outline = boundingOutline(parts);
   const guessed = parts.filter((p) => p.hGuess).map((p) => p.ref);
   if (guessed.length) notes.push(`Heights for ${guessed.join(', ')} are estimates from the package type; set the real ones in the placement editor.`);
   for (const p of parts) delete p.hGuess;

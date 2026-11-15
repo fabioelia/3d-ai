@@ -9,7 +9,10 @@ import { putFile, fromB64, toB64, embedFiles } from '../files.js';
 import { saveFile, safeName } from '../export.js';
 import { toolByName } from './catalog.js';
 import { evalExpr } from '../expr.js';
-import { checkBoard, airwires, autoPlace, overBoard, turnPart, flipPart, bodyCenter } from '../board/geometry.js';
+import { checkBoard, autoPlace, overBoard, turnPart, flipPart, bodyCenter } from '../board/geometry.js';
+import { airwires, drc, numericBoard, rulesOf, copperLength } from '../board/route.js';
+import { fabFiles } from '../board/gerber.js';
+import { zip } from '../export.js';
 import { eagleScript } from '../board/script.js';
 
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -80,7 +83,15 @@ function viewState() {
   } else if (mode.kind === 'board') {
     const f = featureById(mode.id);
     out.mode = `placing parts on ${mode.id} in the board placement editor (a 2D top view${act.app.board?.flip ? ', seen from below' : ''}; the 3D view is behind it until they press Done)`;
-    out.board_editor = { board: mode.id, tool: mode.tool || 'select', grid_mm: act.app.board?.grid, ...(sel.shape ? { selected: String(sel.shape).startsWith('hole:') ? { hole: Number(String(sel.shape).slice(5)), ...f?.holes?.[Number(String(sel.shape).slice(5))] } : { part: sel.shape } } : {}) };
+    const selKind = String(sel.shape || '').split(':');
+    out.board_editor = {
+      board: mode.id,
+      tool: mode.tool || 'select',
+      layer: act.app.board?.layer,
+      grid_mm: act.app.board?.grid,
+      ...(act.app.board?.route ? { routing: { net: act.app.board.route.net, layer: act.app.board.route.layer, points: act.app.board.route.pts } } : {}),
+      ...(sel.shape ? { selected: selKind.length === 2 ? { [selKind[0]]: Number(selKind[1]), ...(selKind[0] === 'hole' ? f?.holes : selKind[0] === 'trace' ? f?.traces : f?.vias)?.[Number(selKind[1])] } : { part: sel.shape } } : {}),
+    };
   } else if (mode.kind === 'plane') out.mode = 'starting a sketch: choosing a plane';
   else out.mode = 'modelling';
   const picks = mode.kind === 'pick' ? (featureById(mode.feature)?.[mode.key]?.pick || []).map((p) => ({ kind: mode.pick, b: p.b, i: p.i })) : sel.picks;
@@ -308,6 +319,18 @@ const IMPL = {
   async import_file(args, ctx) {
     await ready();
     if (!args.data) return fail('import_file reads files through the Caliper MCP bridge; it is not available here.');
+    if (args.board_part) {
+      // A 3D model for one part of a board.
+      const b = findBoard(args.board);
+      if (!(b.parts || []).some((p) => p.ref === args.board_part)) return fail(`There is no part ${args.board_part} on ${b.id}.`);
+      if (!/\.(step|stp|stl|obj|3mf)$/i.test(args.fileName || '')) return fail('A part model must be a STEP, STL, OBJ or 3MF file.');
+      const id = await putFile(args.fileName, fromB64(args.data));
+      update((doc) => {
+        const p = doc.features.find((x) => x.id === b.id).parts.find((q) => q.ref === args.board_part);
+        p.model = { file: id, fileName: args.fileName, ...(args.units ? { units: args.units } : {}), ...(args.rot ? { rot: args.rot } : {}), ...(args.at ? { at: args.at } : {}) };
+      }, { by: ctx.by });
+      return rebuildReport({ model_for: `${b.id}.${args.board_part}`, note: 'The model is centred on the part body and stands on the board; adjust with place_parts (parts[].model) if it is turned wrong.' });
+    }
     toModelMode(ctx.by);
     const item = { name: args.fileName || 'model.stl', bytes: fromB64(args.data) };
     const props = {};
@@ -432,7 +455,15 @@ const IMPL = {
       name = `${safeName(featureLabel(b))}-placement.scr`;
       bytes = new TextEncoder().encode(eagleScript(b, num, { name: featureLabel(b) }));
       note = 'Run it in the Eagle or Fusion Electronics board editor: File > Execute Script.';
-    } else return fail('format must be stl, step, project or eagle_script.');
+    } else if (args.format === 'gerber') {
+      const b = findBoard(args.board);
+      const nb = numericBoard(b, num);
+      const base2 = safeName(featureLabel(b));
+      const res = drc(nb);
+      name = `${base2}-gerbers.zip`;
+      bytes = new Uint8Array(await zip(fabFiles(nb, base2).map((x) => ({ name: x.name, data: new TextEncoder().encode(x.data) }))).arrayBuffer());
+      note = `Gerber and drill files for ${featureLabel(b)}${res.unrouted ? `; WARNING: ${res.unrouted} connections are not routed` : ''}${res.issues.length ? `; WARNING: ${res.issues.length} design-rule errors` : ''}. Check them in a Gerber viewer before ordering.`;
+    } else return fail('format must be stl, step, project, eagle_script or gerber.');
     logActivity(ctx.by, `exported ${name}`);
     if (ctx.transport === 'bridge') return { content: [text({ file: name, bytes: bytes.length, ...(note ? { note } : {}) })], files: [{ name, path: args.path || null, data: toB64(bytes) }] };
     const msg = await saveFile(name, bytes, 'application/octet-stream');
@@ -465,8 +496,10 @@ function findBoard(id) {
 
 function boardSummary(b) {
   const issues = checkBoard(b, num);
-  const wires = airwires(b);
+  const nb = numericBoard(b, num);
+  const wires = airwires(nb);
   const parts = b.parts || [];
+  const copper = (nb.traces || []).length || (nb.vias || []).length ? drc(nb) : null;
   return {
     board: b.id,
     outline: b.outline,
@@ -476,8 +509,12 @@ function boardSummary(b) {
     total: parts.length,
     not_placed: parts.filter((p) => p.off).map((p) => p.ref),
     problems: issues.filter((i) => i.kind !== 'unplaced').map((i) => i.message),
-    airwires: wires.length,
-    airwire_length_mm: Math.round(wires.filter((w) => !w.offBoard).reduce((s, w) => s + w.length, 0)),
+    unrouted_connections: wires.filter((w) => !w.offBoard).length,
+    unrouted_length_mm: Math.round(wires.filter((w) => !w.offBoard).reduce((s, w) => s + w.length, 0)),
+    traces: (nb.traces || []).length,
+    vias: (nb.vias || []).length,
+    rules: rulesOf(b),
+    ...(copper ? { drc_errors: copper.issues.length } : {}),
   };
 }
 
@@ -516,6 +553,11 @@ IMPL.place_parts = async (args, ctx) => {
         if (ch.side && ch.side !== (p.side || 'top')) flipPart(p);
         if (ch.turn) turnPart(p, Number(ch.turn));
         for (const k of ['x', 'y', 'rot', 'h', 'lift', 'shape', 'value', 'color']) if (ch[k] !== undefined) p[k] = ch[k];
+        if (ch.model !== undefined) {
+          if (ch.model === 'auto') delete p.model;
+          else if (ch.model === 'box') p.model = 'box';
+          else if (typeof ch.model === 'object' && p.model && typeof p.model === 'object') p.model = { ...p.model, ...ch.model };
+        }
         if (ch.body) p.body = { ...p.body, ...ch.body };
         if (ch.center) {
           // Place by the centre of the body rather than the package origin.
@@ -551,6 +593,69 @@ IMPL.place_parts = async (args, ctx) => {
   );
 };
 
+IMPL.route_board = async (args, ctx) => {
+  await ready();
+  const b = findBoard(args.board);
+  const action = args.action || 'autoroute';
+  let routed = null;
+  if (args.rules) update((doc) => {
+    const f = doc.features.find((x) => x.id === b.id);
+    f.rules = { ...(f.rules || {}), ...args.rules };
+  }, { by: ctx.by });
+  if (action === 'clear') {
+    update((doc) => {
+      const f = doc.features.find((x) => x.id === b.id);
+      if (args.nets?.length) {
+        f.traces = (f.traces || []).filter((t) => !args.nets.includes(t.net));
+        f.vias = (f.vias || []).filter((v) => !args.nets.includes(v.net));
+      } else {
+        f.traces = [];
+        f.vias = [];
+      }
+    }, { by: ctx.by });
+  } else if (action === 'autoroute') {
+    const cur = featureById(b.id);
+    routed = await act.app.kernel.autoroute(numericBoard(cur, num), { ...(args.nets ? { nets: args.nets } : {}), ...(args.width ? { width: args.width } : {}) });
+    if (routed.traces.length || routed.vias.length)
+      update((doc) => {
+        const f = doc.features.find((x) => x.id === b.id);
+        f.traces = [...(f.traces || []), ...routed.traces];
+        f.vias = [...(f.vias || []), ...routed.vias];
+      }, { by: ctx.by });
+  } else if (action === 'add') {
+    const traces = (args.traces || []).map((t) => ({ net: t.net || null, layer: t.layer === 'bottom' ? 'bottom' : 'top', w: Number(t.w) || rulesOf(b).trace, pts: (t.pts || []).map((p) => [Number(p[0]), Number(p[1])]) })).filter((t) => t.pts.length >= 2);
+    const vias = (args.vias || []).map((v) => ({ x: Number(v.x), y: Number(v.y), d: Number(v.d) || rulesOf(b).via, drill: Number(v.drill) || rulesOf(b).drill, net: v.net || null }));
+    update((doc) => {
+      const f = doc.features.find((x) => x.id === b.id);
+      f.traces = [...(f.traces || []), ...traces];
+      f.vias = [...(f.vias || []), ...vias];
+    }, { by: ctx.by });
+  } else if (action === 'remove') {
+    const tr = new Set(args.remove_traces || []);
+    const vi = new Set(args.remove_vias || []);
+    update((doc) => {
+      const f = doc.features.find((x) => x.id === b.id);
+      f.traces = (f.traces || []).filter((_, i) => !tr.has(i));
+      f.vias = (f.vias || []).filter((_, i) => !vi.has(i));
+    }, { by: ctx.by });
+  } else if (action !== 'rules') return fail('action must be autoroute, add, remove, clear or rules.');
+  await act.app.rebuildNow();
+  const fresh = featureById(b.id);
+  const nb = numericBoard(fresh, num);
+  const res = drc(nb);
+  return ok(
+    text({
+      ...(routed ? { autorouted: { routed: routed.routed, of: routed.total, new_traces: routed.traces.length, new_vias: routed.vias.length, failed: routed.failed.map((x) => `${x.net}: ${x.a} – ${x.b}`) } } : {}),
+      traces: (nb.traces || []).length,
+      vias: (nb.vias || []).length,
+      unrouted: res.airwires.map((w) => `${w.net}: ${w.a} – ${w.b}`),
+      drc_errors: res.issues.slice(0, 40).map((i) => i.message),
+      total_drc_errors: res.issues.length,
+      next: res.unrouted ? 'Route what is left with action "add" (or move parts apart and autoroute again), then look with screenshot view "board".' : 'Look with screenshot view "board"; export with export_file format "gerber".',
+    }),
+  );
+};
+
 IMPL.check_board = async (args) => {
   await ready();
   const b = findBoard(args.board);
@@ -562,7 +667,13 @@ IMPL.check_board = async (args) => {
     const fit = await act.app.kernel.interference({ board: b.id, clearance: args.clearance ?? 0.5 });
     out.enclosure = fit.bodies ? { checked_against: fit.bodies, issues: fit.issues.map((i) => (i.kind === 'collides' ? `${i.part} runs into ${i.body} (${i.bodyId}): ${i.volume} mm³ overlap.` : `${i.part} is ${i.distance} mm from ${i.body} (${i.bodyId}).`)) } : { note: 'No other bodies to check against (model or import the enclosure).' };
   }
-  const wires = airwires(b);
+  const nb = numericBoard(b, num);
+  if ((nb.traces || []).length || (nb.vias || []).length) {
+    const res = drc(nb);
+    out.drc = { errors: res.issues.slice(0, 60).map((i) => ({ kind: i.kind, message: i.message, at: i.at.map((v) => Math.round(v * 100) / 100) })), total_errors: res.issues.length, unrouted: res.airwires.map((w) => `${w.net}: ${w.a} – ${w.b}`) };
+    out.copper_length_mm = copperLength(nb);
+  }
+  const wires = airwires(nb);
   const byNet = new Map();
   for (const w of wires) byNet.set(w.net, (byNet.get(w.net) || 0) + w.length);
   out.longest_nets = [...byNet.entries()].sort((x, y) => y[1] - x[1]).slice(0, 10).map(([net, len]) => ({ net, length_mm: Math.round(len) }));

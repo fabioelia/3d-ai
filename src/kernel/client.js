@@ -1,6 +1,6 @@
 // Main-thread handle on the geometry worker.
 import KernelWorker from './worker.js?worker&inline';
-import { getFile } from '../files.js';
+import { getFile, fileIdsIn } from '../files.js';
 
 const CDN_MESH_WASM = 'https://unpkg.com/manifold-3d@3.5.4/manifold.wasm';
 const CDN_FONT = 'https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf';
@@ -84,7 +84,7 @@ export class Kernel {
   // each the first time a document needs it.
   async syncFiles(doc) {
     this.sent ||= new Set();
-    const ids = new Set((doc.features || []).filter((f) => f.type === 'import' && f.file && !f.suppressed).map((f) => f.file));
+    const ids = new Set(fileIdsIn({ features: (doc.features || []).filter((f) => !f.suppressed) }));
     for (const fileId of ids) {
       if (this.sent.has(fileId)) continue;
       const file = await getFile(fileId);
@@ -100,6 +100,11 @@ export class Kernel {
 
   listElements(kind, sel, limit) {
     return this.call('list', { kind, sel, limit });
+  }
+
+  // The board must be numeric (numericBoard); returns { traces, vias, routed, failed, total }.
+  autoroute(board, opts) {
+    return this.call('autoroute', { board, opts });
   }
 
   interference(opts) {

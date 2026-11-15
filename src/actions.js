@@ -2,6 +2,7 @@
 import { store, update, select, setMode, newFeatureId, featureById, emit } from './store.js';
 import { FEATURES, DEFAULTS, MAKES_TOOL } from './schema.js';
 import { readEagle, isEagle } from './board/eagle.js';
+import { readKicad, isKicad } from './board/kicad.js';
 import { boardPolygon } from './board/geometry.js';
 import { bounds } from './sketchgeo.js';
 
@@ -128,7 +129,8 @@ export function finishSketch() {
 }
 
 // ---------- boards ----------
-const BOARD_EXT = /\.(sch|brd)$/i;
+const BOARD_EXT = /\.(sch|brd|kicad_pcb|kicad_sch|net)$/i;
+const IS_LAYOUT = /\.(brd|kicad_pcb)$/i;
 
 export function editBoard(id) {
   const f = featureById(id);
@@ -261,7 +263,7 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
         app.toast(`${name}: ${e.message}`, 'error');
       }
     } else if (MODEL_EXT.test(name)) parts.push({ name, bytes });
-    else if (BOARD_EXT.test(name) || (/\.(xml|eagle)$/i.test(name) && isEagle(bytes))) {
+    else if (BOARD_EXT.test(name) || (/\.(xml|eagle|txt)$/i.test(name) && (isEagle(bytes) || isKicad(bytes)))) {
       boards.push({ name, bytes });
       others?.push({ name, bytes });
     }
@@ -338,12 +340,15 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
 // the same name, since it knows where the parts go.
 function importBoards(files, { by }) {
   const base = (n) => n.replace(/^.*[\\/]/, '').replace(BOARD_EXT, '').toLowerCase();
-  const withBoard = new Set(files.filter((f) => /\.brd$/i.test(f.name)).map((f) => base(f.name)));
+  const withBoard = new Set(files.filter((f) => IS_LAYOUT.test(f.name)).map((f) => base(f.name)));
   const ids = [];
   for (const file of files) {
-    if (/\.sch$/i.test(file.name) && withBoard.has(base(file.name))) continue;
+    if (!IS_LAYOUT.test(file.name) && withBoard.has(base(file.name))) continue;
     try {
-      const { props, notes } = readEagle(file.bytes, file.name.replace(/^.*[\\/]/, ''));
+      const short = file.name.replace(/^.*[\\/]/, '');
+      const reader = isKicad(file.bytes) ? readKicad : isEagle(file.bytes) ? readEagle : null;
+      if (!reader) throw new Error('not an Eagle, Fusion Electronics or KiCad file Caliper can read.');
+      const { props, notes } = reader(file.bytes, short);
       if (store.mode.kind !== 'model') leaveMode();
       const f = addBoard(props, { by, name: file.name.replace(/^.*[\\/]/, '').replace(BOARD_EXT, '') });
       ids.push(f.id);

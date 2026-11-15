@@ -3,7 +3,10 @@ import { store, on, emit, update, select, featureById, undo, redo, setMode } fro
 import { evalExpr, fmt } from './expr.js';
 import { FEATURES, SHAPES, EDGE_PRESETS, FACE_PRESETS, MAKES_TOOL, featureLabel } from './schema.js';
 import * as act from './actions.js';
-import { checkBoard, airwires, flipPart } from './board/geometry.js';
+import { checkBoard, flipPart } from './board/geometry.js';
+import { airwires, drc, numericBoard, rulesOf, RULES, copperLength } from './board/route.js';
+import { fabFiles } from './board/gerber.js';
+import { zip } from './export.js';
 import { eagleScript } from './board/script.js';
 import { GRIDS } from './board/editor.js';
 import { saveFile, safeName } from './export.js';
@@ -67,6 +70,7 @@ export const ICON = {
   rotate: svg('<path d="M20 12a8 8 0 11-2.300-5.600"/><path d="M20 4v5h-5"/>'),
   flip: svg('<path d="M12 3v18" stroke-dasharray="2 3"/><path d="M8 8l-4 4 4 4M16 8l4 4-4 4"/>'),
   off: svg('<rect x="9" y="9" width="11" height="11" rx="1"/><path d="M4 4l6 6M4 9V4h5"/>'),
+  route: svg('<path d="M4 18h5l6-12h5"/><circle cx="4" cy="18" r="1.800"/><circle cx="20" cy="6" r="1.800"/>'),
   arrange: svg('<rect x="3.500" y="3.500" width="8" height="6"/><rect x="13.500" y="3.500" width="7" height="6"/><rect x="3.500" y="12.500" width="5" height="8"/><rect x="10.500" y="12.500" width="10" height="8"/>'),
   download: svg('<path d="M12 4v11M7.500 10.500L12 15l4.500-4.500M5 20h14"/>'),
 };
@@ -467,7 +471,9 @@ function boardRows(f, setter) {
   const { mode, sel } = store;
   const editing = mode.kind === 'board' && mode.id === f.id;
   const ref = editing ? sel.shape : null;
-  const part = ref && !String(ref).startsWith('hole:') ? (f.parts || []).find((p) => p.ref === ref) : null;
+  const part = ref && !String(ref).includes(':') ? (f.parts || []).find((p) => p.ref === ref) : null;
+  const traceAt = ref && String(ref).startsWith('trace:') ? Number(String(ref).slice(6)) : -1;
+  const viaAt = ref && String(ref).startsWith('via:') ? Number(String(ref).slice(4)) : -1;
   const holeAt = ref && String(ref).startsWith('hole:') ? Number(String(ref).slice(5)) : -1;
   const hole = holeAt >= 0 ? f.holes?.[holeAt] : null;
   const n = (v) => {
@@ -486,7 +492,14 @@ function boardRows(f, setter) {
       { key },
     );
   const out = [];
-  out.push(h('div', { class: 'insp-actions' }, h('button', { class: 'btn primary', type: 'button', onclick: () => (editing ? act.leaveMode() : act.editBoard(f.id)) }, editing ? 'Done placing' : 'Place parts')));
+  out.push(
+    h(
+      'div',
+      { class: 'insp-actions' },
+      h('button', { class: 'btn primary', type: 'button', onclick: () => (editing ? act.leaveMode() : act.editBoard(f.id)) }, editing ? 'Done' : 'Place and route'),
+      h('button', { class: 'btn small', type: 'button', title: 'Add a block for a part that is not in the schematic (a battery holder, a sensor on a cable…)', onclick: () => (act.editBoard(f.id), act.addBoardPart(f.id)) }, 'Add a block'),
+    ),
+  );
 
   if (part) {
     const pset = (key, v) =>
@@ -514,11 +527,72 @@ function boardRows(f, setter) {
       row('Body depth', exprInput({ id: 'part-d', label: 'Body depth', unit: 'mm', get: () => body.d, set: (v) => bset('d', v) })),
       row('Shape', selectInput({ id: 'part-shape', label: 'Shape', options: [['box', 'Box'], ['cylinder', 'Cylinder']], get: () => part.shape || 'box', set: (v) => pset('shape', v) })),
     );
+    // 3D model: drawn from the footprint, a plain block, or the person's own file.
+    const model = part.model && typeof part.model === 'object' ? part.model : null;
+    const pickModel = () => {
+      const input = h('input', { type: 'file', accept: '.step,.stp,.stl,.obj,.3mf,.wrl', hidden: true });
+      input.addEventListener('change', async () => {
+        const file = input.files[0];
+        if (!file) return;
+        if (/\.wrl$/i.test(file.name)) return toast('VRML (.wrl) models are not supported; use the STEP version of the model (KiCad ships both).', 'error');
+        const { putFile } = await import('./files.js');
+        const id = await putFile(file.name, new Uint8Array(await file.arrayBuffer()));
+        pset('model', { file: id, fileName: file.name });
+        toast(`${part.ref} now shows ${file.name}, centred on its body. Turn or shift it below if it sits wrong.`);
+      });
+      document.body.append(input);
+      input.click();
+      setTimeout(() => input.remove(), 60000);
+    };
+    out.push(
+      row(
+        '3D model',
+        selectInput({
+          id: 'part-model',
+          label: '3D model',
+          options: [['auto', 'From the footprint'], ['box', 'Plain block'], ...(model ? [['file', `File: ${model.fileName}`]] : []), ['pick', 'Load a STEP / STL file…']],
+          get: () => (model ? 'file' : part.model === 'box' ? 'box' : 'auto'),
+          set: (v) => (v === 'pick' ? pickModel() : v === 'file' ? null : pset('model', v === 'box' ? 'box' : undefined)),
+        }),
+      ),
+    );
+    if (model) {
+      const mset = (key, v) =>
+        editIn((x) => {
+          const p = x.parts.find((q) => q.ref === part.ref);
+          if (p?.model && typeof p.model === 'object') p.model = { ...p.model, [key]: v };
+        }, `${f.id}.${part.ref}.model.${key}`);
+      out.push(
+        row('Model turn', vec3Field(model, { key: 'rot', label: 'Model turn', def: [0, 0, 0] }, (v) => mset('rot', v), 'model-rot'), 'degrees about x, y, z'),
+        row('Model shift', vec3Field(model, { key: 'at', label: 'Model shift', def: [0, 0, 0] }, (v) => mset('at', v), 'model-at')),
+        row('Model units', selectInput({ id: 'model-units', label: 'Model units', options: [['mm', 'Millimetres'], ['in', 'Inches'], ['cm', 'Centimetres'], ['m', 'Metres']], get: () => model.units || 'mm', set: (v) => mset('units', v) })),
+      );
+    }
     const on = h('input', { type: 'checkbox', id: 'part-on', onchange: () => (on.checked ? pset('off', undefined) : act.app.board?.takeOff()) });
     on.checked = !part.off;
     out.push(h('label', { class: 'row check' }, on, h('span', {}, 'On the board')));
     const nets = (f.nets || []).filter((net) => (net.pads || []).some(([r]) => r === part.ref)).map((net) => net.name);
     if (nets.length) out.push(h('p', { class: 'insp-note' }, `Connects to ${nets.join(', ')}.`));
+  } else if (traceAt >= 0 && f.traces?.[traceAt]) {
+    const t = f.traces[traceAt];
+    let len = 0;
+    for (let i = 0; i + 1 < t.pts.length; i++) len += Math.hypot(t.pts[i + 1][0] - t.pts[i][0], t.pts[i + 1][1] - t.pts[i][1]);
+    const tset = (key, v) => editIn((x) => x.traces[traceAt] && (x.traces[traceAt][key] = v), `${f.id}.trace${traceAt}.${key}`);
+    out.push(
+      h('h3', { class: 'insp-sub' }, 'Trace', h('span', { class: 'insp-sub-note' }, `${t.net || 'no net'} · ${fmt(len, 1)} mm`)),
+      row('Width', exprInput({ id: 'trace-w', label: 'Width', unit: 'mm', get: () => t.w ?? RULES.trace, set: (v) => tset('w', Number(v) || RULES.trace) })),
+      row('Layer', selectInput({ id: 'trace-layer', label: 'Layer', options: [['top', 'Top copper'], ['bottom', 'Bottom copper']], get: () => t.layer || 'top', set: (v) => tset('layer', v) })),
+      h('div', { class: 'insp-actions' }, h('button', { class: 'btn small danger', type: 'button', onclick: () => act.app.board?.takeOff() }, 'Delete trace')),
+    );
+  } else if (viaAt >= 0 && f.vias?.[viaAt]) {
+    const v = f.vias[viaAt];
+    const vset = (key, val) => editIn((x) => x.vias[viaAt] && (x.vias[viaAt][key] = val), `${f.id}.via${viaAt}.${key}`);
+    out.push(
+      h('h3', { class: 'insp-sub' }, 'Via', h('span', { class: 'insp-sub-note' }, v.net || 'no net')),
+      row('Pad', exprInput({ id: 'via-d', label: 'Pad', unit: 'mm', get: () => v.d, set: (val) => vset('d', Number(val) || RULES.via) })),
+      row('Drill', exprInput({ id: 'via-drill', label: 'Drill', unit: 'mm', get: () => v.drill, set: (val) => vset('drill', Number(val) || RULES.drill) })),
+      h('div', { class: 'insp-actions' }, h('button', { class: 'btn small danger', type: 'button', onclick: () => act.app.board?.takeOff() }, 'Delete via')),
+    );
   } else if (hole) {
     const hset = (key, v) =>
       editIn((x) => {
@@ -573,18 +647,75 @@ function boardRows(f, setter) {
     const cur = featureById(f.id);
     if (!cur) return;
     const issues = checkBoard(cur, n);
-    const wires = airwires(cur);
+    const wires = airwires(numericBoard(cur, n));
     const len = wires.filter((w) => !w.offBoard).reduce((sum, w) => sum + w.length, 0);
     list.replaceChildren(
       ...(issues.length ? issues : [{ kind: 'ok', refs: [], message: 'No clashes: every part is on the board, clear of the others, the edge and the holes.' }]).map((i) =>
         h('li', { class: `bi-${i.kind}`, onclick: () => i.refs[0] && (act.editBoard(f.id), select({ shape: i.refs[0] })) }, i.message),
       ),
-      h('li', { class: 'bi-info' }, `${(cur.nets || []).length} nets, ${wires.length} airwires, ${Math.round(len)} mm of connections to route.`),
+      h('li', { class: 'bi-info' }, wires.length ? `${(cur.nets || []).length} nets; ${wires.length} connection${wires.length === 1 ? '' : 's'} (${Math.round(len)} mm) still to route.` : `${(cur.nets || []).length} nets, all routed.`),
     );
   };
   refreshers.push(fillIssues);
   fillIssues();
   out.push(h('h3', { class: 'insp-sub' }, 'Placement check'), list);
+
+  // Copper: design rules, their check, and the autorouter.
+  const rules = rulesOf(f);
+  const rset = (key, v) => editIn((x) => (x.rules = { ...(x.rules || {}), [key]: Number(v) || RULES[key] }), `${f.id}.rules.${key}`);
+  const drcList = h('ul', { class: 'board-issues', 'aria-live': 'polite' });
+  const fillDrc = () => {
+    const cur = featureById(f.id);
+    if (!cur) return;
+    const nb = numericBoard(cur, n);
+    if (!(nb.traces || []).length && !(nb.vias || []).length) {
+      drcList.replaceChildren(h('li', { class: 'bi-info' }, 'No copper yet. Route by hand (Route tool, X) or let the autorouter do it.'));
+      return;
+    }
+    const res = drc(nb);
+    const lens = copperLength(nb);
+    const total = Object.values(lens).reduce((a, v) => a + v, 0);
+    drcList.replaceChildren(
+      ...(res.issues.length ? res.issues.slice(0, 40) : [{ kind: 'ok', message: `Design rules pass: ${nb.traces.length} traces (${Math.round(total)} mm), ${(nb.vias || []).length} vias.` }]).map((i) => h('li', { class: i.kind === 'ok' ? 'bi-ok' : 'bi-overlap' }, i.message)),
+      ...(res.issues.length > 40 ? [h('li', { class: 'bi-info' }, `and ${res.issues.length - 40} more.`)] : []),
+      h('li', { class: res.unrouted ? 'bi-unplaced' : 'bi-ok' }, res.unrouted ? `${res.unrouted} connection${res.unrouted === 1 ? '' : 's'} still unrouted.` : 'Every connection is routed.'),
+    );
+  };
+  refreshers.push(fillDrc);
+  fillDrc();
+  out.push(
+    h('h3', { class: 'insp-sub' }, 'Routing'),
+    h(
+      'div',
+      { class: 'rules-grid' },
+      row('Trace', exprInput({ id: 'rule-trace', label: 'Trace width', unit: 'mm', get: () => rules.trace, set: (v) => rset('trace', v) })),
+      row('Clearance', exprInput({ id: 'rule-clearance', label: 'Clearance', unit: 'mm', get: () => rules.clearance, set: (v) => rset('clearance', v) })),
+      row('Via', exprInput({ id: 'rule-via', label: 'Via pad', unit: 'mm', get: () => rules.via, set: (v) => rset('via', v) })),
+      row('Via drill', exprInput({ id: 'rule-drill', label: 'Via drill', unit: 'mm', get: () => rules.drill, set: (v) => rset('drill', v) })),
+    ),
+    drcList,
+    h(
+      'div',
+      { class: 'insp-actions' },
+      h('button', { class: 'btn small', type: 'button', title: 'Route every connection that is not routed yet, keeping the traces already there', onclick: () => (act.editBoard(f.id), act.app.board?.autoroute()) }, 'Autoroute'),
+      h('button', { class: 'btn small', type: 'button', title: 'Remove every trace and via', onclick: () => editIn((x) => ((x.traces = []), (x.vias = [])), null) }, 'Remove copper'),
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        title: 'Gerber and drill files to order the board from a board house',
+        onclick: async () => {
+          const cur = featureById(f.id);
+          const nb = numericBoard(cur, n);
+          const res = drc(nb);
+          const base = safeName(featureLabel(cur));
+          const files = fabFiles(nb, base);
+          const blob = zip(files.map((x) => ({ name: x.name, data: new TextEncoder().encode(x.data) })));
+          const msg = await saveFile(`${base}-gerbers.zip`, new Uint8Array(await blob.arrayBuffer()), 'application/zip');
+          if (msg) toast(`${msg}.${res.unrouted ? ` Note: ${res.unrouted} connections are not routed yet.` : ''}${res.issues.length ? ` ${res.issues.length} design-rule errors remain.` : ''} Check the files in a Gerber viewer before ordering.`, res.unrouted || res.issues.length ? 'error' : 'info');
+        },
+      }, 'Export Gerbers'),
+    ),
+  );
   const fit = h('ul', { class: 'board-issues' });
   out.push(
     h(
@@ -750,7 +881,8 @@ function renderInspector(force = false) {
 
   // Nothing selected: part summary.
   const res = store.results;
-  const bodies = res?.bodies || [];
+  // A board's parts, pins and copper are many bodies; the board's own row stands for them.
+  const bodies = (res?.bodies || []).filter((b) => !b.kind || b.kind === 'board');
   box.replaceChildren(
     h('div', { class: 'insp-head' }, h('span', { class: 'insp-ico', html: ICON.box }), h('h2', {}, 'Part')),
     bodies.length
@@ -790,31 +922,43 @@ function renderModebar() {
     const ed = act.app.board;
     const tool = (id, label, tip) => h('button', { class: `tool${mode.tool === id ? ' active' : ''}`, type: 'button', title: tip, 'aria-pressed': String(mode.tool === id), onclick: () => act.setBoardTool(id) }, h('span', { class: 'tool-ico', html: ICON[id] }), h('span', { class: 'tool-label' }, label));
     const cmd = (icon, label, tip, fn) => h('button', { class: 'tool', type: 'button', title: tip, onclick: fn }, h('span', { class: 'tool-ico', html: ICON[icon] }), h('span', { class: 'tool-label' }, label));
-    const arrange = h(
+    const auto = h(
       'select',
-      { class: 'in mb-select', 'aria-label': 'Arrange parts automatically', title: 'Arrange parts automatically', onchange: () => {
-        const v = arrange.value;
-        arrange.value = '';
+      { class: 'in mb-select', 'aria-label': 'Arrange or route automatically', title: 'Arrange parts or route copper automatically', onchange: () => {
+        const v = auto.value;
+        auto.value = '';
         if (v === 'rest') ed.arrange('rest', ['top', 'bottom']);
         else if (v === 'top') ed.arrange('all', ['top']);
         else if (v === 'both') ed.arrange('all', ['top', 'bottom']);
+        else if (v === 'route') ed.autoroute();
+        else if (v === 'unroute') ed.clearCopper();
       } },
-      h('option', { value: '' }, 'Arrange…'),
+      h('option', { value: '' }, 'Auto…'),
       h('option', { value: 'rest' }, 'Place the rest'),
       h('option', { value: 'top' }, 'Rearrange all, top side'),
       h('option', { value: 'both' }, 'Rearrange all, both sides'),
+      h('option', { value: 'route' }, 'Autoroute what is left'),
+      h('option', { value: 'unroute' }, 'Remove all traces and vias'),
     );
     const grid = h('select', { class: 'in mb-select', 'aria-label': 'Snap grid', title: 'Snap grid (hold Alt while dragging to place freely)', onchange: () => ed.setGrid(Number(grid.value)) }, GRIDS.map((g) => h('option', { value: String(g) }, `${g} mm`)));
     grid.value = String(ed.grid);
     const below = h('input', { type: 'checkbox', id: 'board-below', onchange: () => ed.setFlip(below.checked) });
     below.checked = ed.flip;
+    const routing = mode.tool === 'route';
+    const layer = h('select', { class: 'in mb-select', id: 'route-layer', 'aria-label': 'Copper layer', title: 'Layer to draw on (V while routing drops a via and switches)', onchange: () => ed.setLayer(layer.value) }, h('option', { value: 'top' }, 'Top copper'), h('option', { value: 'bottom' }, 'Bottom copper'));
+    layer.value = ed.layer;
+    const rules = rulesOf(f || {});
+    const width = h('select', { class: 'in mb-select', id: 'route-width', 'aria-label': 'Trace width', title: 'Width of new traces', onchange: () => update((doc) => { const x = doc.features.find((y) => y.id === mode.id); if (x) x.rules = { ...(x.rules || {}), trace: Number(width.value) }; }) }, [0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.8, 1].map((w) => h('option', { value: String(w) }, `${w} mm`)));
+    width.value = String(rules.trace);
     kids = [
       h('span', { class: 'mb-title' }, featureLabel(f || { type: 'board' })),
-      h('div', { class: 'mb-tools', role: 'toolbar', 'aria-label': 'Board tools' }, tool('select', 'Select', 'Select and drag parts (V)'), tool('hole', 'Hole', 'Click to add mounting holes (H)')),
-      h('div', { class: 'mb-tools' }, cmd('rotate', 'Rotate', 'Turn the selected part 90° (R, Shift+R the other way)', () => ed.rotate(90)), cmd('flip', 'Flip', 'Move the selected part to the other side of the board (F)', () => ed.flipSide()), cmd('off', 'Off board', 'Take the selected part off the board (Delete)', () => ed.takeOff()), cmd('plus', 'Block', 'Add a block for a part that is not in the schematic', () => act.addBoardPart(mode.id))),
-      arrange,
+      h('div', { class: 'mb-tools', role: 'toolbar', 'aria-label': 'Board tools' }, tool('select', 'Select', 'Select and drag parts, traces and vias (V)'), tool('route', 'Route', 'Draw copper traces: click a pad, click corners, click the pad to join (X)'), tool('hole', 'Hole', 'Click to add mounting holes (H)')),
+      routing
+        ? h('div', { class: 'mb-tools' }, layer, width)
+        : h('div', { class: 'mb-tools' }, cmd('rotate', 'Rotate', 'Turn the selected part 90° (R, Shift+R the other way)', () => ed.rotate(90)), cmd('flip', 'Flip', 'Move the selected part to the other side of the board (F)', () => ed.flipSide()), cmd('off', 'Remove', 'Take the selected part off the board, or delete the selected trace, via or hole (Delete)', () => ed.takeOff())),
+      auto,
       grid,
-      h('label', { class: 'mb-check', for: 'board-below' }, below, 'From below'),
+      h('label', { class: 'mb-check', for: 'board-below', title: 'Look at the board from below' }, below, 'Below'),
       h('button', { class: 'btn small', type: 'button', onclick: () => ed.fit() }, 'Fit'),
       h('button', { class: 'btn primary', type: 'button', id: 'board-done', onclick: () => act.leaveMode() }, 'Done'),
     ];
@@ -851,7 +995,9 @@ function renderModebar() {
   const hint = $('hint');
   hint.textContent =
     mode.kind === 'board'
-      ? 'Drag parts to place them; R turns, F flips, Delete takes one off, arrows nudge. Scroll zooms, drag empty space to pan. Alt: no snap.'
+      ? mode.tool === 'route'
+        ? 'Click a pad, click corners (45°), click a pad of the same net to finish. V: via to the other layer, Backspace: undo a corner, double-click: end here, Esc: cancel.'
+        : 'Drag parts to place them; R turns, F flips, Delete removes, arrows nudge, X routes. Scroll zooms, drag empty space to pan. Alt: no snap.'
       : mode.kind === 'sketch'
       ? 'Drag to draw. Right-drag orbits, middle-drag pans. Hold Alt to turn off snapping. Esc cancels.'
       : mode.kind === 'pick'

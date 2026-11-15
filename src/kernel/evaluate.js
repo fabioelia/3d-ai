@@ -4,7 +4,10 @@
 import { evalExpr, resolveParams } from '../expr.js';
 import { BASE_PLANES, frameFromFace, offsetFrame, toWorld, v3, axisVec } from '../frame.js';
 import { pathPoints } from '../sketchgeo.js';
-import { boardPolygon, bodyCenter } from '../board/geometry.js';
+import { boardPolygon } from '../board/geometry.js';
+import { partModel, DARK, METAL } from '../board/models.js';
+import { copperMesh } from '../board/copper3d.js';
+import { numericBoard } from '../board/route.js';
 import { detectFormat, parseMesh, readSTEPSolid } from './formats.js';
 import { parseSTL, repairMesh, weldMesh, closedVolume, describeRepairs, meshToSTL, stlToSolid, stlToMesh, meshDisplay, meshTriangles, RawMesh, rawDisplay, SOLID_TRIANGLE_LIMIT } from './stl.js';
 
@@ -41,6 +44,8 @@ export function createKernel(r) {
   const topoCache = new WeakMap();
   const files = new Map(); // imported file id -> bytes
   const importCache = new Map(); // `${file}:${mode}` -> { shape, kind, triangles } or { error }
+  const partCache = new Map(); // a board part's model, by everything that shapes it
+  const copperCache = new Map();
   const isRaw = (s) => s instanceof RawMesh;
   const isMesh = (s) => s instanceof r.MeshShape || isRaw(s);
 
@@ -639,6 +644,128 @@ export function createKernel(r) {
     }
   }
 
+  // A 3D file read once per file and mode: an exact solid, a mesh body or a reference mesh.
+  function loadImport(fileId, fileName, want, bytes) {
+    const key = `${fileId}:${want}`;
+    let imp = importCache.get(key);
+    if (!imp) {
+      try {
+        const format = detectFormat(bytes, fileName);
+        // STEP with real surfaces comes in exactly as it was modelled.
+        const stepSolid = format === 'step' ? readSTEPSolid(r, bytes) : null;
+        if (stepSolid) imp = { shape: want === 'mesh' ? asMesh(stepSolid) : stepSolid, kind: want === 'mesh' ? 'mesh' : 'solid', exact: true, format, triangles: 0, repairs: '', dropped: 0 };
+        const raw = stepSolid ? null : parseMesh(bytes, format);
+        // Strict first; then merge vertices a hair apart (0.01, then 0.05 mm), well below what a
+        // printer resolves, the way slicers tolerate sloppy exports.
+        const attempts = stepSolid ? [] : [0, 0.01, 0.05];
+        let lastError = null;
+        for (const weld of attempts) {
+          let parsed;
+          if (weld) {
+            const w = weldMesh(raw, weld);
+            parsed = repairMesh(w);
+            if (w.merged) {
+              parsed.stats.welded = weld;
+              parsed.stats.merged = w.merged;
+            }
+            parsed.changed = true;
+          } else parsed = repairMesh(raw);
+          let shape = null;
+          let kind = 'mesh';
+          let dropped = 0;
+          // Only a verifiably closed mesh becomes an exact solid, and the solid must enclose the same
+          // volume: OpenCascade will otherwise happily build a wrong solid from a broken mesh.
+          const closed = closedVolume(parsed);
+          if (closed !== null && closed > 0 && (want === 'solid' || (want === 'auto' && parsed.triangles <= SOLID_TRIANGLE_LIMIT))) {
+            try {
+              const solid = stlToSolid(r, meshToSTL(parsed)); // welded, with proper normals (some files have none)
+              if (Math.abs(r.measureVolume(solid) - closed) > 0.01 * closed + 1e-6) throw new Error('volume mismatch');
+              shape = solid;
+              kind = 'solid';
+            } catch (e) {
+              lastError = e.message === 'not watertight' ? 'This STL has gaps, so it cannot become an exact solid. Try "Mesh" mode.' : 'This STL could not be turned into an exact solid. Try "Mesh" mode.';
+            }
+          }
+          if (!shape && want !== 'solid') {
+            try {
+              ({ shape, dropped } = stlToMesh(r, parsed));
+            } catch (e) {
+              lastError = e.message;
+            }
+          }
+          // A strict pass that had to leave pieces out is worth one more try with welding.
+          if (shape && (!dropped || weld === attempts[attempts.length - 1])) {
+            imp = { shape, kind, triangles: parsed.triangles, repairs: describeRepairs(parsed.stats), dropped };
+            break;
+          }
+          if (shape && !imp) imp = { shape, kind, triangles: parsed.triangles, repairs: describeRepairs(parsed.stats), dropped };
+        }
+        if (imp && !imp.format) imp.format = format;
+        if (!imp && want !== 'solid') {
+          // Beyond repair: keep it as a reference mesh, exactly as it came in.
+          const kept = repairMesh(raw);
+          imp = { shape: new RawMesh(kept.positions, kept.indices), kind: 'reference', format, triangles: kept.triangles, repairs: '', dropped: 0, why: lastError };
+        }
+        if (!imp) throw new Error(lastError || 'This STL file could not be read.');
+      } catch (e) {
+        imp = { error: e.message || 'This STL file could not be read.' };
+      }
+      importCache.set(key, imp);
+    }
+    return imp;
+  }
+
+  // A board part's 3D model in its own coordinates: built from its footprint and size, a plain box, or
+  // the person's own 3D file (STEP, STL, OBJ, 3MF) set on its body. Cached by what shapes it.
+  function partShapes(p, th, notes) {
+    const model = p.model && typeof p.model === 'object' ? p.model : null;
+    const key = JSON.stringify([p.body, p.h, p.lift, p.pads, p.shape, p.family, p.package, p.value, p.ref?.[0], p.model, th]);
+    if (partCache.has(key)) return partCache.get(key);
+    const b = p.body || { cx: 0, cy: 0, w: 2, d: 2 };
+    let out = null;
+    if (model?.file) {
+      const bytes = files.get(model.file);
+      const imp = bytes ? loadImport(model.file, model.fileName, 'auto', bytes) : { error: `the file for ${p.ref}'s model is not loaded` };
+      if (imp.error) notes.push(`${p.ref}: ${imp.error}; showing a plain block.`);
+      else {
+        let s = imp.shape.clone();
+        const k = ({ mm: 1, cm: 10, m: 1000, in: 25.4 }[model.units || 'mm'] || 1) * (Number(model.scale) || 1);
+        if (Math.abs(k - 1) > 1e-12) s = xf.scale(s, k);
+        const rot = (model.rot || [0, 0, 0]).map(Number);
+        if (rot[0]) s = xf.rotate(s, rot[0], [0, 0, 0], [1, 0, 0]);
+        if (rot[1]) s = xf.rotate(s, rot[1], [0, 0, 0], [0, 1, 0]);
+        if (rot[2]) s = xf.rotate(s, rot[2], [0, 0, 0], [0, 0, 1]);
+        if (model.align !== 'origin') {
+          // Centre it on the part's body and stand it on the board (or on its lift).
+          const [lo, hi] = s.boundingBox.bounds;
+          s = s.translate([b.cx - (lo[0] + hi[0]) / 2, b.cy - (lo[1] + hi[1]) / 2, (p.lift || 0) - lo[2]]);
+        }
+        const at = (model.at || [0, 0, 0]).map(Number);
+        if (at[0] || at[1] || at[2]) s = s.translate(at);
+        out = { main: s, color: p.color };
+      }
+    }
+    if (!out && p.model === 'box') {
+      const w = Math.max(0.2, b.w);
+      const d = Math.max(0.2, b.d);
+      const h = Math.max(0.2, p.h ?? 1);
+      const lift = p.lift || 0;
+      out = { main: p.shape === 'cylinder' ? r.makeCylinder(Math.max(w, d) / 2, h, [b.cx, b.cy, lift]) : r.makeBox([b.cx - w / 2, b.cy - d / 2, lift], [b.cx + w / 2, b.cy + d / 2, lift + h]) };
+    }
+    if (!out) {
+      try {
+        out = partModel(r, p, th);
+      } catch {
+        const w = Math.max(0.2, b.w);
+        const d = Math.max(0.2, b.d);
+        out = { main: r.makeBox([b.cx - w / 2, b.cy - d / 2, 0], [b.cx + w / 2, b.cy + d / 2, Math.max(0.2, p.h ?? 1)]) };
+      }
+    }
+    if (partCache.size > 400) partCache.clear();
+    partCache.set(key, out);
+    return out;
+  }
+
   // ---------- features ----------
   function applyFeature(f, state, ctx) {
     const n = (v) => {
@@ -764,22 +891,41 @@ export function createKernel(r) {
         }
         const bodies = state.bodies.slice();
         bodies.push({ id: f.id, name: f.name || 'Board', shape: place(shape, f, n), kind: 'board', color: f.color || '#2f6b3a' });
-        for (const p of f.parts || []) {
+        const nb = numericBoard(f, n);
+        const notes = [];
+        for (const p of nb.parts) {
           if (p.off) continue;
-          const b = p.body || { w: 2, d: 2 };
-          const w = Math.max(0.2, n(b.w));
-          const d = Math.max(0.2, n(b.d));
-          const h = Math.max(0.2, n(p.h ?? 1));
-          const lift = n(p.lift ?? 0);
-          let s = p.shape === 'cylinder' ? r.makeCylinder(Math.max(w, d) / 2, h) : r.makeBaseBox(w, d, h);
-          const rot = n(p.rot ?? 0);
-          if (rot) s = s.rotate(rot, [0, 0, 0], [0, 0, 1]);
-          const c = bodyCenter({ ...p, x: n(p.x ?? 0), y: n(p.y ?? 0), rot });
-          s = s.translate([c[0], c[1], p.side === 'bottom' ? -lift - h : th + lift]);
-          bodies.push({ id: `${f.id}.${p.ref}`, name: p.value ? `${p.ref} (${p.value})` : p.ref, shape: place(s, f, n), kind: 'part', ref: p.ref, board: f.id, color: p.color || '#3a3d44' });
+          const m = partShapes(p, th, notes);
+          // Package coordinates -> board: flip to the underside, turn, move, then the board's own placement.
+          const toBoard = (sh) => {
+            let s2 = sh.clone();
+            if (p.side === 'bottom') s2 = xf.rotate(s2, 180, [0, 0, 0], [0, 1, 0]);
+            else s2 = s2.translate([0, 0, th]);
+            if (p.rot) s2 = xf.rotate(s2, p.rot, [0, 0, 0], [0, 0, 1]);
+            if (p.x || p.y) s2 = s2.translate([p.x, p.y, 0]);
+            return place(s2, f, n);
+          };
+          const base = { kind: 'part', ref: p.ref, board: f.id };
+          const name = p.value ? `${p.ref} (${p.value})` : p.ref;
+          bodies.push({ id: `${f.id}.${p.ref}`, name, shape: toBoard(m.main), ...base, color: m.color || p.color || '#3a3d44' });
+          if (m.dark) bodies.push({ id: `${f.id}.${p.ref}.dark`, name: `${p.ref} plastic`, shape: toBoard(m.dark), ...base, color: DARK, detail: true });
+          if (m.metal) bodies.push({ id: `${f.id}.${p.ref}.pins`, name: `${p.ref} pins`, shape: toBoard(m.metal), ...base, color: m.metalColor || METAL, detail: true });
         }
+        if (f.copper !== false) {
+          const ck = JSON.stringify([nb.parts.filter((p) => !p.off).map((p) => [p.ref, p.x, p.y, p.rot, p.side, p.pads]), nb.traces, nb.vias, nb.nets, th]);
+          let mesh = copperCache.get(ck);
+          if (!mesh) {
+            const cm = copperMesh(nb, th);
+            mesh = cm.indices.length ? new RawMesh(cm.positions, cm.indices) : null;
+            if (copperCache.size > 20) copperCache.clear();
+            copperCache.set(ck, mesh);
+          }
+          if (mesh) bodies.push({ id: `${f.id}.copper`, name: `${f.name || 'Board'} copper`, shape: place(mesh.clone(), f, n), kind: 'copper', board: f.id, color: '#c98a3c', detail: true });
+        }
+        if (notes.length) rec.warn = notes.join(' ');
         const on = (f.parts || []).filter((p) => !p.off).length;
-        rec.note = `${on} of ${(f.parts || []).length} parts on the board${(f.nets || []).length ? `, ${f.nets.length} nets` : ''}. Open the placement editor to arrange them.`;
+        rec.note = `${on} of ${(f.parts || []).length} parts on the board${(f.nets || []).length ? `, ${f.nets.length} nets` : ''}${(f.traces || []).length ? `, ${f.traces.length} traces and ${(f.vias || []).length} vias` : ''}. Open the placement editor to arrange and route them.${rec.warn ? ` ${rec.warn}` : ''}`;
+        delete rec.warn;
         return { state: { ...state, bodies, count: state.count + 1 }, rec };
       }
 
@@ -788,72 +934,7 @@ export function createKernel(r) {
         const bytes = files.get(f.file);
         if (!bytes) fail(`The file for this import${f.fileName ? ` (${f.fileName})` : ''} is not loaded. Import it again, or open the project file that contains it.`);
         const want = f.mode === 'solid' || f.mode === 'mesh' ? f.mode : 'auto';
-        const key = `${f.file}:${want}`;
-        let imp = importCache.get(key);
-        if (!imp) {
-          try {
-            const format = detectFormat(bytes, f.fileName);
-            // STEP with real surfaces comes in exactly as it was modelled.
-            const stepSolid = format === 'step' ? readSTEPSolid(r, bytes) : null;
-            if (stepSolid) imp = { shape: want === 'mesh' ? asMesh(stepSolid) : stepSolid, kind: want === 'mesh' ? 'mesh' : 'solid', exact: true, format, triangles: 0, repairs: '', dropped: 0 };
-            const raw = stepSolid ? null : parseMesh(bytes, format);
-            // Strict first; then merge vertices a hair apart (0.01, then 0.05 mm), well below what a
-            // printer resolves, the way slicers tolerate sloppy exports.
-            const attempts = stepSolid ? [] : [0, 0.01, 0.05];
-            let lastError = null;
-            for (const weld of attempts) {
-              let parsed;
-              if (weld) {
-                const w = weldMesh(raw, weld);
-                parsed = repairMesh(w);
-                if (w.merged) {
-                  parsed.stats.welded = weld;
-                  parsed.stats.merged = w.merged;
-                }
-                parsed.changed = true;
-              } else parsed = repairMesh(raw);
-              let shape = null;
-              let kind = 'mesh';
-              let dropped = 0;
-              // Only a verifiably closed mesh becomes an exact solid, and the solid must enclose the same
-              // volume: OpenCascade will otherwise happily build a wrong solid from a broken mesh.
-              const closed = closedVolume(parsed);
-              if (closed !== null && closed > 0 && (want === 'solid' || (want === 'auto' && parsed.triangles <= SOLID_TRIANGLE_LIMIT))) {
-                try {
-                  const solid = stlToSolid(r, meshToSTL(parsed)); // welded, with proper normals (some files have none)
-                  if (Math.abs(r.measureVolume(solid) - closed) > 0.01 * closed + 1e-6) throw new Error('volume mismatch');
-                  shape = solid;
-                  kind = 'solid';
-                } catch (e) {
-                  lastError = e.message === 'not watertight' ? 'This STL has gaps, so it cannot become an exact solid. Try "Mesh" mode.' : 'This STL could not be turned into an exact solid. Try "Mesh" mode.';
-                }
-              }
-              if (!shape && want !== 'solid') {
-                try {
-                  ({ shape, dropped } = stlToMesh(r, parsed));
-                } catch (e) {
-                  lastError = e.message;
-                }
-              }
-              // A strict pass that had to leave pieces out is worth one more try with welding.
-              if (shape && (!dropped || weld === attempts[attempts.length - 1])) {
-                imp = { shape, kind, triangles: parsed.triangles, repairs: describeRepairs(parsed.stats), dropped };
-                break;
-              }
-              if (shape && !imp) imp = { shape, kind, triangles: parsed.triangles, repairs: describeRepairs(parsed.stats), dropped };
-            }
-            if (imp && !imp.format) imp.format = format;
-            if (!imp && want !== 'solid') {
-              // Beyond repair: keep it as a reference mesh, exactly as it came in.
-              const kept = repairMesh(raw);
-              imp = { shape: new RawMesh(kept.positions, kept.indices), kind: 'reference', format, triangles: kept.triangles, repairs: '', dropped: 0, why: lastError };
-            }
-            if (!imp) throw new Error(lastError || 'This STL file could not be read.');
-          } catch (e) {
-            imp = { error: e.message || 'This STL file could not be read.' };
-          }
-          importCache.set(key, imp);
-        }
+        const imp = loadImport(f.file, f.fileName, want, bytes);
         if (imp.error) fail(imp.error);
         const units = { mm: 1, cm: 10, m: 1000, in: 25.4 }[f.units || 'mm'] || 1;
         const k = units * n(f.scale ?? 1);
@@ -1126,7 +1207,7 @@ export function createKernel(r) {
         max: t.max,
         volume: m.volume,
         ...(m.isMesh ? { isMesh: true, triangles: m.triangles, ...(m.isReference ? { isReference: true } : {}) } : {}),
-        ...(b.kind ? { kind: b.kind, color: b.color, ...(b.ref ? { ref: b.ref, board: b.board } : {}) } : {}),
+        ...(b.kind ? { kind: b.kind, color: b.color, ...(b.board ? { board: b.board } : {}), ...(b.ref ? { ref: b.ref } : {}), ...(b.detail ? { detail: true } : {}) } : {}),
       };
       transfer.push(out.positions.buffer, out.normals.buffer, out.indices.buffer, out.lines.buffer);
       return out;
@@ -1332,7 +1413,7 @@ export function createKernel(r) {
   // Boards and their parts against the rest of the model (an enclosure): what collides, and what
   // comes closer than `clearance`. Each part is tested as its own body.
   function interference({ board = null, clearance = 0.5 } = {}) {
-    const parts = lastState.bodies.filter((b) => b.kind && (!board || b.board === board || b.id === board));
+    const parts = lastState.bodies.filter((b) => (b.kind === 'part' || b.kind === 'board') && !isRaw(b.shape) && (!board || b.board === board || b.id === board));
     const others = lastState.bodies.filter((b) => !b.kind && !isRaw(b.shape));
     const out = [];
     const rnd = (v) => Math.round(v * 1000) / 1000;

@@ -38,7 +38,7 @@ const state = {
 const MAX_IMAGES = 6;
 const MAX_TEXT = 200 * 1024; // per file
 const MAX_TEXT_TOTAL = 500 * 1024;
-const MODEL_FILE = /\.(stl|step|stp|obj|3mf|zip|sch|brd)$/i;
+const MODEL_FILE = /\.(stl|step|stp|obj|3mf|zip|sch|brd|kicad_pcb|kicad_sch|net)$/i;
 const IMAGE_TYPES = /^image\/(png|jpeg|webp|gif)$/;
 
 // ---------- attachments ----------
@@ -119,7 +119,7 @@ export async function attachFiles(files) {
       if (why) unread.push(why);
     }
   }
-  if (unread.length) act.app.toast(`Could not attach ${unread.join(', ')}. The chat reads images and text files; Caliper imports STL, STEP, OBJ, 3MF and Eagle .sch / .brd.`, 'error');
+  if (unread.length) act.app.toast(`Could not attach ${unread.join(', ')}. The chat reads images and text files; Caliper imports STL, STEP, OBJ, 3MF and Eagle and KiCad boards.`, 'error');
   renderAttachments();
   if (state.attachments.length) $('chat-input').focus();
   return true;

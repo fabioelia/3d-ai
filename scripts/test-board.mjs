@@ -93,7 +93,12 @@ const k = await loadKernel();
 const board = { id: 'pcb', type: 'board', name: 'Board', thickness: 1.6, at: [0, 0, 10], ...structuredClone(B) };
 let out = k.evaluate({ features: [board] }).result;
 ok(!out.features.pcb.error, `board builds ${out.features.pcb.error || ''}`);
-ok(out.bodies.length === 5 && out.bodies[0].kind === 'board' && out.bodies.slice(1).every((b) => b.kind === 'part' && b.color), `one body for the board and one per part (${out.bodies.map((b) => b.id)})`);
+const mains = out.bodies.filter((b) => b.kind === 'part' && !b.detail);
+ok(out.bodies[0].kind === 'board' && mains.length === 4 && mains.every((b) => b.color) && out.bodies.some((b) => b.kind === 'copper'), `the board, a model per part (with its pins and plastic) and the copper (${out.bodies.map((b) => b.id)})`);
+const partBox = (ref) => {
+  const list = out.bodies.filter((b) => b.ref === ref);
+  return { min: [0, 1, 2].map((k) => Math.min(...list.map((b) => b.min[k]))), max: [0, 1, 2].map((k) => Math.max(...list.map((b) => b.max[k]))) };
+};
 const pcb = out.bodies[0];
 const outlineArea = (() => {
   let a = 0;
@@ -107,23 +112,24 @@ const outlineArea = (() => {
 const holeArea = 2 * Math.PI * 1.6 * 1.6;
 ok(near(pcb.volume, (outlineArea - holeArea) * 1.6, 2), `board volume is outline × thickness minus holes (${pcb.volume.toFixed(1)} vs ${((outlineArea - holeArea) * 1.6).toFixed(1)})`);
 ok(near(pcb.min[2], 10) && near(pcb.max[2], 11.6), 'the board sits where "at" puts it');
-const U1 = out.bodies.find((b) => b.ref === 'U1');
-ok(near(U1.min[2], 11.6) && near(U1.max[2], 14.6), `top parts stand on the top face (${U1.min[2]}..${U1.max[2]})`);
-const C1 = out.bodies.find((b) => b.ref === 'C1');
-ok(near(C1.max[2], 10) && C1.min[2] < 10, `bottom parts hang under the board (${C1.min[2]}..${C1.max[2]})`);
+const U1 = out.bodies.find((b) => b.id === 'pcb.U1');
+ok(near(U1.min[2], 11.6) && near(partBox('U1').max[2], 14.6), `top parts stand on the top face (${U1.min[2]}..${partBox('U1').max[2]})`);
+ok(partBox('U1').min[2] < 10, 'their pins reach through the board');
+const C1 = out.bodies.find((b) => b.id === 'pcb.C1');
+ok(C1.max[2] <= 10 + 1e-6 && C1.min[2] < 5, `bottom parts hang under the board (${C1.min[2]}..${C1.max[2]})`);
 const R1 = out.bodies.find((b) => b.ref === 'R1');
 ok(near(R1.max[0] - R1.min[0], 2.5) && near(R1.max[1] - R1.min[1], 5.08), 'turned parts are turned in 3D');
 
 // An enclosure that a part runs into.
 const lid = { id: 'lid', type: 'box', w: 60, d: 50, h: 2, at: [25, 20, 13.5], op: 'new' };
 out = k.evaluate({ features: [board, lid] }).result;
-ok(out.bodies.length === 6, 'later solids do not merge into the board or its parts');
+ok(out.bodies.some((b) => b.id === 'lid') && out.bodies.filter((b) => b.kind === 'part' && !b.detail).length === 4, 'later solids do not merge into the board or its parts');
 let hits = k.interference({ clearance: 0.5 });
 ok(hits.issues.some((i) => i.part === 'U1' && i.kind === 'collides' && i.volume > 0), `interference finds the module running into the lid (${JSON.stringify(hits.issues)})`);
 lid.at = [25, 20, 14.8];
 k.evaluate({ features: [board, lid] });
 hits = k.interference({ clearance: 0.5 });
-ok(hits.issues.some((i) => i.part === 'U1' && i.kind === 'close' && near(i.distance, 0.2, 0.01)), `and parts that come closer than the clearance (${JSON.stringify(hits.issues)})`);
+ok(hits.issues.some((i) => i.part === 'U1' && i.kind === 'close' && near(i.distance, 0.2, 0.01)) && !hits.issues.some((i) => i.kind === 'collides'), `and parts that come closer than the clearance (${JSON.stringify(hits.issues)})`);
 
 // STL export leaves the electronics out; STEP keeps them.
 const stl = k.exportSTL(null, 'draft');

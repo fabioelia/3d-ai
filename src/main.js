@@ -56,6 +56,7 @@ const boardEditor = new BoardEditor(document.querySelector('.stage'), {
   },
   tool: () => (store.mode.kind === 'board' ? store.mode.tool || 'select' : 'select'),
   setTool: (t) => act.setBoardTool(t),
+  autoroute: (board, opts) => kernel.autoroute(board, opts),
   toast: (m) => toast(m),
 });
 Object.assign(act.app, { viewport, sketcher, board: boardEditor, kernel, toast, rebuildNow });
@@ -165,6 +166,7 @@ function syncHighlights() {
 let lastModeKind = 'model';
 on('mode', () => {
   const { mode } = store;
+  if (mode.kind === 'board' && mode.tool !== 'route' && boardEditor.route) boardEditor.cancelRoute();
   if (mode.kind === 'board' && !boardEditor.active) boardEditor.enter();
   else if (mode.kind !== 'board' && boardEditor.active) boardEditor.exit();
   else if (boardEditor.active) boardEditor.render();
@@ -371,12 +373,12 @@ window.addEventListener('drop', (e) => {
     });
     if (!files.some((f) => /\.(stl|zip)$/i.test(f.name))) return;
   }
-  const stls = files.filter((f) => /\.(stl|step|stp|obj|3mf|zip|sch|brd)$/i.test(f.name));
+  const stls = files.filter((f) => /\.(stl|step|stp|obj|3mf|zip|sch|brd|kicad_pcb|kicad_sch|net)$/i.test(f.name));
   // Other files (notes, schematics) go to the chat for Claude to read.
   const docs = files.filter((f) => !pictures.includes(f) && !stls.includes(f));
   if (docs.length) attachFiles(docs).then((ok) => ok && (showTab('assistant'), toast(`Attached ${docs.map((f) => f.name).join(', ')} to your next chat message.`)));
   if (stls.length) act.importFiles(stls);
-  else if (!pictures.length && !docs.length) toast('Drop 3D files (STL, STEP, OBJ, 3MF or a zip) or Eagle boards (.sch, .brd) to import them, other files to share them with Claude, or a .caliper.json project to open it.', 'error');
+  else if (!pictures.length && !docs.length) toast('Drop 3D files (STL, STEP, OBJ, 3MF or a zip) or boards (Eagle .sch / .brd, KiCad .kicad_pcb / .kicad_sch / .net) to import them, other files to share them with Claude, or a .caliper.json project to open it.', 'error');
 });
 
 // ---------- theme ----------

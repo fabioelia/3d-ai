@@ -1,6 +1,7 @@
 // Board geometry shared by the kernel, the placement editor and the checks. Everything here is in the
 // board's own 2D coordinates (millimetres, seen from the top, origin at the board origin).
 import { outline as shapeOutline, pointInPolygon, distToPolyline, bounds } from '../sketchgeo.js';
+import { padShape } from './footprints.js';
 
 const rad = (d) => (d * Math.PI) / 180;
 export const rot2 = (p, deg) => {
@@ -48,8 +49,9 @@ export function footprintBox(part) {
   let y0 = b.cy - b.d / 2;
   let y1 = b.cy + b.d / 2;
   for (const pad of Object.values(part.pads || {})) {
-    const hw = (pad[3] ?? pad[2] ?? 1) / 2;
-    const hh = (pad[4] ?? pad[2] ?? 1) / 2;
+    const ps = padShape(pad);
+    const hw = ps.w / 2;
+    const hh = ps.h / 2;
     x0 = Math.min(x0, pad[0] - hw);
     x1 = Math.max(x1, pad[0] + hw);
     y0 = Math.min(y0, pad[1] - hh);
@@ -338,4 +340,72 @@ export function partColor(part) {
   const b = part.body || { w: 0, d: 0 };
   if (b.w * b.d > 120) return '#2f5b8f'; // a module: its own little blue board
   return '#3a3d44';
+}
+
+// Closed board outline from loose edge segments ({ a, b, bulge } with the bulge of the arc from a to b),
+// as Eagle's Dimension layer and KiCad's Edge.Cuts hold them. A circle or rectangle is recognised.
+export function chainOutline(segs) {
+  const round = (v, k = 1000) => Math.round(v * k) / k;
+  const left = segs.slice();
+  if (left.length < 2) return null;
+  const same = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 0.01;
+  const chain = [left.shift()];
+  while (left.length) {
+    const end = chain[chain.length - 1].b;
+    const i = left.findIndex((w) => same(w.a, end) || same(w.b, end));
+    if (i < 0) break;
+    const w = left.splice(i, 1)[0];
+    chain.push(same(w.a, end) ? w : { a: w.b, b: w.a, bulge: -(w.bulge || 0) });
+  }
+  // Each point carries the bulge of the segment that ends at it (as Caliper paths do); the last
+  // segment ends where the first starts, so it goes first.
+  const pts = chain.map((w) => [round(w.b[0]), round(w.b[1]), w.bulge ? round(w.bulge, 10000) : 0]);
+  pts.unshift(pts.pop());
+  const xs = pts.map((p) => p[0]);
+  const ys = pts.map((p) => p[1]);
+  const w = Math.max(...xs) - Math.min(...xs);
+  const hgt = Math.max(...ys) - Math.min(...ys);
+  const rectish = pts.length === 4 && pts.every((p) => !p[2]) && pts.every((p, i) => {
+    const q = pts[(i + 1) % 4];
+    return Math.abs(p[0] - q[0]) < 1e-3 || Math.abs(p[1] - q[1]) < 1e-3;
+  });
+  if (rectish) return { kind: 'rect', w: round(w, 100), h: round(hgt, 100), x: round(Math.min(...xs) + w / 2), y: round(Math.min(...ys) + hgt / 2) };
+  return { kind: 'path', pts };
+}
+
+// A rectangle around every part, 1 mm clear (for a board file with no outline).
+export function boundingOutline(parts) {
+  const pts = parts.flatMap((p) => footprintPolygon(p));
+  const b = bounds(pts.length ? pts : [[-20, -15], [20, 15]]);
+  return { kind: 'rect', w: Math.ceil(b.x1 - b.x0 + 2), h: Math.ceil(b.y1 - b.y0 + 2), r: 2, x: r3(b.cx), y: r3(b.cy) };
+}
+
+// Parts from a schematic or netlist have no places yet: arrange them on the given outline, or on a
+// rectangle drawn to fit them (grown until all fit, then trimmed to them). Returns a note.
+export function layoutNewBoard(out) {
+  const parts = out.parts;
+  const made = !out.outline;
+  if (made) {
+    const area = parts.reduce((sum, p) => {
+      const f = footprintBox(p);
+      return sum + (f.x1 - f.x0 + 2) * (f.y1 - f.y0 + 2);
+    }, 0) * 1.5;
+    const w = Math.max(20, Math.ceil(Math.sqrt(area * 1.33) / 5) * 5);
+    out.outline = { kind: 'rect', w, h: Math.max(15, Math.ceil(area / w / 5) * 5), r: 2 };
+  }
+  let res = autoPlace(out);
+  for (let i = 0; made && res.off.length && i < 12; i++) {
+    out.outline.w += 5;
+    out.outline.h += 5;
+    res = autoPlace(out);
+  }
+  if (made && !res.off.length) {
+    const o = boundingOutline(parts);
+    for (const p of parts) {
+      p.x = r3(p.x - o.x);
+      p.y = r3(p.y - o.y);
+    }
+    out.outline = { kind: 'rect', w: o.w, h: o.h, r: 2 };
+  }
+  return res.placed === parts.length ? `Arranged all ${parts.length} parts on the board (the file does not say where they go); drag them where you want them.` : `Arranged ${res.placed} of ${parts.length} parts on the board; the rest wait beside it until you drag them on.`;
 }

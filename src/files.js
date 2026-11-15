@@ -72,7 +72,15 @@ export async function getFile(id) {
   return rec;
 }
 
-export const fileIdsIn = (doc) => [...new Set((doc.features || []).filter((f) => f.type === 'import' && f.file).map((f) => f.file))];
+// Every stored file a document uses: imported 3D files, and 3D models set on board parts.
+export const fileIdsIn = (doc) => [
+  ...new Set(
+    (doc.features || []).flatMap((f) => [
+      ...(f.type === 'import' && f.file ? [f.file] : []),
+      ...(f.type === 'board' ? (f.parts || []).map((p) => p.model?.file).filter(Boolean) : []),
+    ]),
+  ),
+];
 
 const toB64 = (bytes) => {
   let s = '';

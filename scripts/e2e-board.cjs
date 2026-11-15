@@ -114,7 +114,7 @@ const ok = (c, m) => {
   const corner = await at([-f.outline.w / 2 - 12, 0]);
   await drag(await partAt('Q1'), corner);
   ok((await part('Q1')).off === true, 'a part dragged off the board is marked not placed');
-  await p.selectOption('#modebar select[aria-label="Arrange parts automatically"]', 'rest');
+  await p.selectOption('#modebar select[aria-label="Arrange or route automatically"]', 'rest');
   await settle();
   ok(!(await part('Q1')).off, 'Arrange → Place the rest puts it back on the board');
 
@@ -143,7 +143,7 @@ const ok = (c, m) => {
 
   // --- 3D: one body for the board, one per placed part, in colour
   const res = await p.evaluate(() => window.caliper.store.results.bodies.map((x) => ({ id: x.id, kind: x.kind, color: x.color })));
-  ok(res.length === 5 && res[0].kind === 'board' && res.slice(1).every((x) => x.kind === 'part' && x.color), `3D shows the board and its parts (${res.map((x) => x.id)})`);
+  ok(res[0].kind === 'board' && res.filter((x) => x.kind === 'part' && !/\.(dark|pins)$/.test(x.id)).length === 4 && res.every((x) => x.color), `3D shows the board and a model of each part (${res.map((x) => x.id)})`);
   await p.click('[data-view="iso"]');
   await p.waitForTimeout(500);
   await p.screenshot({ path: `${dir}/e2e-board-3d.png` });
@@ -163,6 +163,51 @@ const ok = (c, m) => {
   // --- STL export leaves the electronics out
   const tri = await p.evaluate(async () => (await window.caliper.act.app.kernel.exportSTL(null, 'draft')).triangles);
   ok(tri === 12, `STL export holds only the printable body (${tri} triangles)`);
+
+  // --- KiCad: a board file comes in with its outline, holes, tracks and vias
+  await p.evaluate(() => window.caliper.store.mode.kind !== 'model' && window.caliper.act.leaveMode());
+  await p.setInputFiles('#import-file', path.join(__dirname, 'fixtures', 'demo.kicad_pcb'));
+  await p.waitForFunction(() => window.caliper.store.doc.features.filter((x) => x.type === 'board').length === 2, null, { timeout: 10000 });
+  await settle();
+  const kb = await p.evaluate(() => JSON.parse(JSON.stringify(window.caliper.store.doc.features.filter((x) => x.type === 'board')[1])));
+  ok(kb.parts.length === 3 && kb.traces.length === 4 && kb.vias.length === 1 && kb.holes.length === 1 && kb.outline.kind === 'path', `a KiCad board imports with parts, copper, holes and outline (${kb.parts.length} parts, ${kb.traces.length} traces)`);
+  await p.screenshot({ path: `${dir}/e2e-board-kicad.png` });
+
+  // --- routing: autoroute, then the design rules pass and nothing is left to route
+  await p.evaluate(() => window.caliper.act.editBoard(window.caliper.store.doc.features.find((f) => f.type === 'board').id));
+  await p.selectOption('#modebar select[aria-label="Arrange or route automatically"]', 'route');
+  await p.waitForFunction(() => (window.caliper.store.doc.features.find((f) => f.type === 'board').traces || []).length > 0, null, { timeout: 30000 }).catch(() => {});
+  await settle();
+  f = await board();
+  ok(f.traces.length > 0, `the autorouter lays traces (${f.traces.length} traces, ${(f.vias || []).length} vias)`);
+  ok(/all routed/.test(await p.textContent('.be-chip')) && /DRC clean/.test(await p.textContent('.be-chip')), `everything is routed and passes the design rules (${await p.textContent('.be-chip')})`);
+  await p.screenshot({ path: `${dir}/e2e-board-routed.png` });
+  // Click a trace to select it, Delete removes it, and its connection comes back as an airwire.
+  const tr = await p.evaluate(() => {
+    const ed = window.caliper.act.app.board;
+    const t = ed.api.board().traces[0];
+    const r = ed.el.getBoundingClientRect();
+    const a = ed.toS(t.pts[0]);
+    const b = ed.toS(t.pts[1]);
+    return [r.left + (a[0] + b[0]) / 2, r.top + (a[1] + b[1]) / 2];
+  });
+  await p.mouse.click(tr[0], tr[1]);
+  ok(/^trace:/.test(await p.evaluate(() => window.caliper.store.sel.shape)), 'clicking a trace selects it');
+  await p.keyboard.press('Delete');
+  await settle();
+  ok((await board()).traces.length === f.traces.length - 1 && /to route/.test(await p.textContent('.be-chip')), 'Delete removes it and the connection is open again');
+  // Route it by hand: X, click the pad, click the other pad.
+  const open = await p.evaluate(() => window.caliper.act.app.board.wires.find((w) => !w.offBoard));
+  await p.keyboard.press('x');
+  const pa = await at(open.from);
+  const pb = await at(open.to);
+  await p.mouse.click(pa[0], pa[1]);
+  ok(!!(await p.evaluate(() => window.caliper.act.app.board.route)), 'the route tool starts a trace on a pad');
+  await p.mouse.click(pb[0], pb[1]);
+  await settle();
+  ok((await board()).traces.length === f.traces.length && /all routed/.test(await p.textContent('.be-chip')), `clicking the other pad finishes it (${await p.textContent('.be-chip')})`);
+  await p.keyboard.press('Escape');
+  await p.keyboard.press('v');
 
   // --- agents see the board view
   const shot = await p.evaluate(async () => (await window.caliper.act.app.board.snapshot({ width: 400, height: 300 })).length);

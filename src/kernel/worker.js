@@ -4,6 +4,7 @@ import opencascade from 'replicad-opencascadejs';
 import Manifold from 'manifold-3d';
 import * as replicad from 'replicad';
 import { createKernel } from './evaluate.js';
+import { autorouteBest } from '../board/route.js';
 import { isZip, readZip, inflateRawWeb } from '../zip.js';
 
 let kernel = null;
@@ -50,6 +51,8 @@ self.onmessage = async ({ data }) => {
       result = kernel.listElements(data.kind, data.sel, data.limit);
     } else if (type === 'measure') {
       result = kernel.measure(data.a, data.b);
+    } else if (type === 'autoroute') {
+      result = autorouteBest(data.board, data.opts || {});
     } else if (type === 'interference') {
       result = kernel.interference(data.opts);
     } else if (type === 'stl') {
