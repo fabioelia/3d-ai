@@ -1224,7 +1224,7 @@ input.in:not([type='password']):not(.insp-name):not(.p-name) {
 
 /* Dropping files onto the window */
 body.dropping .stage::after {
-  content: 'Drop 3D files to import them; images and documents go to the chat';
+  content: 'Drop 3D files or circuit boards to import them; images and documents go to the chat';
   position: absolute;
   inset: 10px;
   display: flex;
@@ -1435,7 +1435,8 @@ body.dropping .stage::after {
 .be-chip {
   position: absolute;
   left: 10px;
-  bottom: 38px;
+  top: 78px;
+  max-width: calc(100% - 20px);
   padding: 4px 9px;
   border-radius: 6px;
   background: rgba(0, 0, 0, 0.55);
@@ -1535,4 +1536,112 @@ body.dropping .stage::after {
   margin-right: 6px;
   border-radius: 2px;
   vertical-align: baseline;
+}
+
+/* Toasts can be clicked away. */
+.toast {
+  cursor: pointer;
+}
+/* A board has a lot to show: its inspector takes more of the column, the chat keeps its input. */
+.inspector.tall {
+  max-height: calc(100% - 190px);
+}
+/* Folding inspector sections. */
+.insp-sec {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 6px;
+}
+.insp-sec > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  user-select: none;
+}
+.insp-sec > summary::-webkit-details-marker {
+  display: none;
+}
+.insp-sec > summary::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.12s;
+  margin: 0 3px 0 1px;
+}
+.insp-sec[open] > summary::before {
+  transform: rotate(45deg);
+}
+.insp-sec > :not(summary) + :not(summary),
+.insp-sec > summary + * {
+  margin-top: 6px;
+}
+.insp-notes {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.insp-notes ul {
+  margin: 0 0 4px;
+  padding-left: 16px;
+}
+@media (max-width: 820px) {
+  /* Phone: tool buttons in the mode bar show icons only, so Done stays in reach. */
+  .modebar .tool-label {
+    display: none;
+  }
+  .modebar .tool {
+    min-width: 34px;
+  }
+  .modebar {
+    gap: 6px;
+  }
+  .be-chip {
+    top: 70px;
+    font-size: 11px;
+  }
+  .inspector.tall {
+    max-height: none;
+  }
+}
+@media (max-width: 820px) {
+  /* Phone: the mode bar wraps instead of hiding Done off the edge. */
+  .modebar {
+    left: 8px;
+    right: 8px;
+    transform: none;
+    max-width: none;
+    flex-wrap: wrap;
+    overflow: visible;
+    row-gap: 4px;
+  }
+  .modebar .mb-title {
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .modebar .btn.primary {
+    margin-left: auto;
+  }
+  .be-chip {
+    top: auto;
+    bottom: 8px;
+  }
+}
+@media (max-width: 820px) {
+  .modebar .mb-select {
+    width: auto;
+    flex: 0 0 auto;
+    max-width: 46%;
+  }
 }

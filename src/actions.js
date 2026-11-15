@@ -1,6 +1,6 @@
 // Commands: everything the toolbar, timeline, viewport clicks and keyboard can do to the document.
 import { store, update, select, setMode, newFeatureId, featureById, emit } from './store.js';
-import { FEATURES, DEFAULTS, MAKES_TOOL } from './schema.js';
+import { FEATURES, DEFAULTS, MAKES_TOOL, featureLabel } from './schema.js';
 import { readEagle, isEagle } from './board/eagle.js';
 import { readKicad, isKicad } from './board/kicad.js';
 import { boardPolygon } from './board/geometry.js';
@@ -32,12 +32,12 @@ function defaultName(type) {
   return `${label} ${n}`;
 }
 
-export function addFeature(type, props = {}, { by = 'user' } = {}) {
+export function addFeature(type, props = {}, { by = 'user', focus = true } = {}) {
   const f = { id: newFeatureId(type), type, name: defaultName(type), ...structuredClone(DEFAULTS[type] || {}), ...props };
   update((doc) => doc.features.push(f), { by });
   // An agent adding a feature opens it in the inspector but leaves the person's selection alone.
   select(by === 'user' ? { feature: f.id, shape: null, picks: [] } : { feature: f.id, shape: null }, { by });
-  if (by === 'user') emit('focus-first');
+  if (by === 'user' && focus) emit('focus-first');
   return f;
 }
 
@@ -128,6 +128,15 @@ export function finishSketch() {
   } else select({ feature: id, shape: null });
 }
 
+// Double-click in the view: a board part opens the placement editor with that part selected.
+export function viewportDoubleClick(pick) {
+  if (store.mode.kind !== 'model' || !pick) return;
+  const body = store.results?.bodies.find((b) => b.id === pick.b);
+  if (!(body?.board || body?.kind === 'board')) return;
+  editBoard(body.board || body.id);
+  if (body.ref) select({ shape: body.ref });
+}
+
 // ---------- boards ----------
 const BOARD_EXT = /\.(sch|brd|kicad_pcb|kicad_sch|net)$/i;
 const IS_LAYOUT = /\.(brd|kicad_pcb)$/i;
@@ -153,7 +162,8 @@ export function addBoard(props = {}, { by = 'user', name = null } = {}) {
   const below = Math.max(0, ...b.parts.filter((p) => !p.off && p.side === 'bottom').map((p) => (Number(p.lift) || 0) + (Number(p.h) || 0)));
   const at = [-bb.cx, -bb.cy, below].map((v) => Math.round(v * 1000) / 1000 || 0);
   const count = store.doc.features.filter((f) => f.type === 'board').length;
-  return addFeature('board', { name: name || `Board ${count + 1}`, ...b, at }, { by });
+  // No field takes the focus: the placement editor's keys (R, F, X…) should reach the board.
+  return addFeature('board', { name: name || `Board ${count + 1}`, ...b, at }, { by, focus: false });
 }
 
 export function addBoardPart(boardId) {
@@ -263,6 +273,14 @@ export function viewportClick(pick, evt) {
     if (store.sel.picks.length) select({ picks: [] });
     return;
   }
+  // A circuit board or one of its parts: select the board (its faces are not for modelling).
+  const body = store.results?.bodies.find((b) => b.id === pick.b);
+  if (body?.board || body?.kind === 'board') {
+    const boardId = body.board || body.id;
+    select({ feature: boardId, shape: null, picks: [] });
+    if (body.ref) app.toast(`${body.name} on ${featureLabel(featureById(boardId) || { type: 'board' })}. Double-click to place it.`);
+    return;
+  }
   const p = { kind: pick.kind, b: pick.b, i: pick.i };
   const same = (q) => q.kind === p.kind && q.b === p.b && q.i === p.i;
   const multi = evt.shiftKey || evt.ctrlKey || evt.metaKey;
@@ -306,7 +324,7 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
           else if (others) others.push(e);
           else skipped.push(e.name);
         }
-        if (!found.some((e) => MODEL_EXT.test(e.name) || BOARD_EXT.test(e.name))) app.toast(`${name} has no 3D files or circuit boards inside (STL, STEP, OBJ, 3MF, Eagle .sch or .brd).`, 'error');
+        if (!found.some((e) => MODEL_EXT.test(e.name) || BOARD_EXT.test(e.name))) app.toast(`${name} has no 3D files or circuit boards inside (STL, STEP, OBJ, 3MF, or an Eagle or KiCad board or schematic).`, 'error');
       } catch (e) {
         app.toast(`${name}: ${e.message}`, 'error');
       }
@@ -316,7 +334,7 @@ export async function importFiles(items, { by = 'user', props = {}, others = nul
       others?.push({ name, bytes });
     }
     else if (others) others.push({ name, bytes });
-    else app.toast(`${name} is not a file Caliper can import (STL, STEP, OBJ, 3MF, Eagle .sch or .brd, or a zip of them).`, 'error');
+    else app.toast(`${name} is not a file Caliper can import (STL, STEP, OBJ, 3MF, an Eagle or KiCad board, schematic or netlist, or a zip of them).`, 'error');
   }
   if (skipped.length) app.toast(`Skipped ${skipped.join(', ')}: not 3D files. Drop the zip into the chat to share them with Claude.`);
   const boardIds = boards.length ? importBoards(boards, { by }) : [];
@@ -400,7 +418,12 @@ function importBoards(files, { by }) {
       if (store.mode.kind !== 'model') leaveMode();
       const f = addBoard(props, { by, name: file.name.replace(/^.*[\\/]/, '').replace(BOARD_EXT, '') });
       ids.push(f.id);
-      app.toast(`${file.name}: ${props.parts.length} parts, ${props.nets.length} nets. ${notes.join(' ')}${by === 'user' ? ' Opening the placement editor.' : ''}`);
+      // A short toast; the full notes stay at the top of the board's inspector.
+      const guessed = notes.find((t) => /estimates/.test(t));
+      const placedNote = notes.find((t) => /^Arranged/.test(t));
+      const placed = props.parts.filter((p) => !p.off).length;
+      app.toast(`${short}: ${props.parts.length} parts, ${props.nets.length} nets${placedNote ? `, ${placed === props.parts.length ? 'all' : placed} arranged on the board` : ''}.${guessed ? ' Some heights are estimates: see the notes in the inspector.' : ''}`);
+      if (notes.length) update((doc) => (doc.features.find((x) => x.id === f.id).notes = notes), { by, quiet: true });
       if (by === 'user') editBoard(f.id);
     } catch (e) {
       app.toast(`${file.name}: ${e.message}`, 'error');
@@ -448,7 +471,7 @@ export function command(name) {
       if (target) return editBoard(target.id);
       const f = addBoard({}, { by: 'user' });
       editBoard(f.id);
-      app.toast('New board. Import an Eagle or Fusion Electronics schematic (.sch) or board (.brd) to bring in its parts, or add blocks for them; set the outline in the inspector.');
+      app.toast('New board. Import a schematic or board (Eagle, Fusion Electronics or KiCad) to bring in its parts, or add blocks; set its outline in the inspector.');
       return f;
     }
     case 'box':

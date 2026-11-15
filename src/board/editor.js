@@ -158,7 +158,9 @@ export class BoardEditor {
     const rules = this.drcResult;
     const copper = rules ? ` · ${rules.unrouted ? `${rules.unrouted} to route` : 'all routed'}${rules.issues.length ? ` · <span class="bad">${rules.issues.length} DRC error${rules.issues.length === 1 ? '' : 's'}</span>` : (b.traces || []).length ? ' · DRC clean' : ''}` : '';
     const routing = this.route ? ` · routing ${esc(this.route.net || 'a trace')} on the ${this.route.layer} (V: via, Backspace: undo point, double-click: finish, Esc: cancel)` : this.api.tool() === 'route' ? ` · click a pad to start a trace on the ${this.layer}` : '';
-    this.chip.innerHTML = `<b>${placed}/${(b.parts || []).length}</b> parts on the board · ${issues.length ? `<span class="bad">${issues.length} problem${issues.length === 1 ? '' : 's'}</span>` : 'no clashes'}${copper} · from ${this.flip ? 'below' : 'above'} · grid ${this.grid} mm${routing}`;
+    this.chip.innerHTML = !(b.parts || []).length
+      ? `No parts yet: import a schematic or board file, or use <b>Add a block</b> in the inspector · grid ${this.grid} mm`
+      : `<b>${placed}/${(b.parts || []).length}</b> parts on the board · ${issues.length ? `<span class="bad">${issues.length} problem${issues.length === 1 ? '' : 's'}</span>` : 'no clashes'}${copper} · from ${this.flip ? 'below' : 'above'} · grid ${this.grid} mm${routing}`;
   }
 
   svg(b, view, size, flip, selected, { forShot = false } = {}) {

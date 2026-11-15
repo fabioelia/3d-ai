@@ -162,6 +162,24 @@ const ok = (c, m) => {
   await p.click('[data-view="iso"]');
   await p.waitForTimeout(500);
   await p.screenshot({ path: `${dir}/e2e-board-3d.png` });
+  // Clicking a part in 3D selects its board; double-clicking opens the editor on that part.
+  const partPt = await p.evaluate(() => {
+    const b = window.caliper.store.results.bodies.find((x) => x.id.endsWith('.U1'));
+    const v = window.caliper.viewport;
+    const r = v.canvas.getBoundingClientRect();
+    const s = v.worldToScreen([(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, b.max[2]]);
+    return [r.left + s[0], r.top + s[1]];
+  });
+  await p.mouse.click(partPt[0], partPt[1]);
+  await p.waitForTimeout(200);
+  let selNow = await p.evaluate(() => ({ f: window.caliper.store.sel.feature, picks: window.caliper.store.sel.picks.length, type: window.caliper.store.doc.features.find((x) => x.id === window.caliper.store.sel.feature)?.type }));
+  ok(selNow.type === 'board' && selNow.picks === 0, `clicking a part in 3D selects its board, not a face (${JSON.stringify(selNow)})`);
+  await p.mouse.dblclick(partPt[0], partPt[1]);
+  await p.waitForTimeout(300);
+  selNow = await p.evaluate(() => ({ mode: window.caliper.store.mode.kind, shape: window.caliper.store.sel.shape }));
+  ok(selNow.mode === 'board' && selNow.shape === 'U1', `double-clicking it opens the placement editor on that part (${JSON.stringify(selNow)})`);
+  await p.evaluate(() => window.caliper.act.leaveMode());
+  await settle();
 
   // --- an enclosure around it: the fit check finds the lid
   await p.evaluate(() => {

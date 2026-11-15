@@ -25,7 +25,7 @@ const RAW_BOOLEAN = 'A reference mesh (an imported STL that is not a closed soli
 const FAIL_HINT = {
   fillet: 'Fillet failed. The radius is probably too large for the selected edges.',
   chamfer: 'Chamfer failed. The distance is probably too large for the selected edges.',
-  shell: 'Shell failed. A wall thicker than a fillet or chamfer on the body cannot be hollowed. Use a thinner wall, or add the fillet after the shell.',
+  shell: 'Shell failed. The wall is probably too thick for this body, or thicker than a fillet or chamfer on it. Use a thinner wall, or add the fillet after the shell.',
   extrude: 'Extrude failed. Check that the sketch shapes are closed and do not overlap themselves.',
   revolve: 'Revolve failed. The profile must sit entirely on one side of the axis.',
 };
@@ -998,6 +998,16 @@ export function createKernel(r) {
           const list = [...set].map((i) => t.faces[i].clone());
           const shape = bodies[bi].shape.shell(th, (fc) => fc.inList(list));
           if (isEmpty(shape)) fail(FAIL_HINT.shell);
+          // A wall too thick for the body can come back as the body unchanged: say so instead.
+          let before = 0;
+          let after = 0;
+          try {
+            before = r.measureVolume(bodies[bi].shape);
+            after = r.measureVolume(shape);
+          } catch {
+            /* no volume to compare */
+          }
+          if (before > 0 && after >= before * 0.999) fail(`A ${th} mm wall is too thick for this body: hollowing it would leave no space inside. Use a thinner wall.`);
           bodies[bi] = { ...bodies[bi], shape };
         }
         return { state: { ...state, bodies }, rec };

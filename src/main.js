@@ -207,6 +207,7 @@ viewport.handlers = {
   },
   pointer: (type, evt) => {
     if (store.mode.kind === 'sketch') sketcher.pointer(type, evt);
+    else if (type === 'dbl' && store.mode.kind === 'model') act.viewportDoubleClick(viewport.pickAt(evt));
   },
   theme: () => {
     sketcher.redraw();
@@ -337,7 +338,7 @@ $('import-file').addEventListener('change', (e) => {
   if (files.length) act.importFiles(files);
 });
 
-// Drop STL files (or a saved project) anywhere on the window.
+// Drop 3D files, circuit files or a saved project anywhere on the window.
 let dragDepth = 0;
 const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 window.addEventListener('dragenter', (e) => {

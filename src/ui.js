@@ -79,8 +79,8 @@ export const ICON = {
 const TOOLBAR = [
   [
     ['sketch', 'Sketch', 'Draw a 2D profile on a plane or a flat face'],
-    ['import', 'Import', 'Bring in a 3D file, or an Eagle / Fusion Electronics .sch or .brd (or drop one onto the view)'],
-    ['board', 'Board', 'Lay out a circuit board: place the parts of an Eagle schematic and see them in 3D'],
+    ['import', 'Import', 'Bring in a 3D file (STL, STEP, OBJ, 3MF) or a circuit (Eagle, Fusion Electronics or KiCad); you can also drop files onto the view'],
+    ['board', 'Board', 'Lay out and route a circuit board, and see it in 3D'],
   ],
   [
     ['box', 'Box', 'Add a box'],
@@ -118,6 +118,7 @@ const SKETCH_TOOLS = [
 const $ = (id) => document.getElementById(id);
 let refreshers = [];
 let inspectorSig = '';
+let inspectorShowing = '';
 let selfEdit = false;
 let toastTimer = null;
 
@@ -126,8 +127,13 @@ export function toast(msg, kind = 'info') {
   el.textContent = msg;
   el.dataset.kind = kind;
   el.hidden = false;
+  el.title = 'Click to dismiss';
+  el.onclick = () => {
+    el.hidden = true;
+    clearTimeout(toastTimer);
+  };
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), kind === 'error' ? 7000 : 4500);
+  toastTimer = setTimeout(() => (el.hidden = true), Math.min(10000, (kind === 'error' ? 5000 : 3500) + String(msg).length * 30));
 }
 
 const scope = () => store.results?.params || {};
@@ -487,6 +493,15 @@ function lineUpRows(f, setter) {
 }
 
 // ---------- boards ----------
+// Inspector sections that fold, remembering whether the person left them open.
+const openSections = new Map();
+function section(key, title, kids, open = true) {
+  const el = h('details', { class: 'insp-sec', 'data-sec': key }, h('summary', {}, title), ...kids.filter(Boolean));
+  el.open = openSections.has(key) ? openSections.get(key) : open;
+  el.addEventListener('toggle', () => openSections.set(key, el.open));
+  return el;
+}
+
 const OUTLINES = [
   ['rect', 'Rectangle'],
   ['circle', 'Circle'],
@@ -654,7 +669,8 @@ function boardRows(f, setter) {
           x.outline = v === 'circle' ? { kind: 'circle', d: big, x: c[0], y: c[1] } : { kind: 'rect', w: span ? span[0] : n(cur.d) || big, h: span ? span[1] : n(cur.d) || big * 0.75, r: 2, x: c[0], y: c[1] };
         }, null),
     });
-    out.push(h('h3', { class: 'insp-sub' }, 'Board'), row('Outline', kind));
+    const mark = out.length;
+    out.push(row('Outline', kind));
     if (ol.kind === 'circle') out.push(row('Diameter', exprInput({ id: 'board-d', label: 'Diameter', unit: 'mm', get: () => ol.d, set: (v) => oset('d', v) })));
     if (ol.kind === 'rect') {
       out.push(
@@ -663,36 +679,29 @@ function boardRows(f, setter) {
         row('Corner radius', exprInput({ id: 'board-r', label: 'Corner radius', unit: 'mm', def: 0, get: () => ol.r, set: (v) => oset('r', v) })),
       );
     }
-    out.push(
-      h(
-        'div',
-        { class: 'insp-actions' },
-        h('button', {
-          class: 'btn small',
-          type: 'button',
-          title: 'Shape the board to the inside of the enclosure at the board\'s height, 1 mm clear of the wall',
-          onclick: async () => {
-            const at = (f.at || [0, 0, 0]).map(n);
-            try {
-              const res = await act.app.kernel.fitBoard({ at, th: n(f.thickness ?? 1.6), clearance: 1 });
-              editIn((x) => (x.outline = res.outline), null);
-              toast(res.outline.kind === 'circle' ? `The enclosure is ${fmt(res.wall.d, 2)} mm across inside at this height; the board is now ${fmt(res.outline.d, 2)} mm round.` : `The board now follows the inside of the enclosure, 1 mm clear of the wall (${res.outline.pts.length} points).`);
-            } catch (e) {
-              toast(e.message, 'error');
-            }
-          },
-        }, 'Fit outline to enclosure'),
-        h('button', {
-          class: 'btn small',
-          type: 'button',
-          title: 'Printed mounting posts under each hole, from the enclosure below up to the board, with a pilot hole for the screw',
-          onclick: async () => {
-            const res = await act.addStandoffs(f.id);
-            if (res.error) return toast(res.error, 'error');
-            toast(`Added ${res.added} standoff${res.added === 1 ? '' : 's'}, joined to the enclosure below, with ${res.added === 1 ? 'a pilot hole' : 'pilot holes'} for self-tapping screws.${res.nothingBelow.length ? ` Nothing is under hole${res.nothingBelow.length === 1 ? '' : 's'} ${res.nothingBelow.join(', ')}, so ${res.nothingBelow.length === 1 ? 'it has' : 'they have'} none.` : ''}${res.skipped.length ? ` Holes ${res.skipped.join(', ')} sit right on a surface.` : ''}`);
-          },
-        }, 'Add standoffs'),
-        h('button', {
+    out.push(...fieldRows(f, FEATURES.board.fields, setter, 'f'));
+    if (ol.kind === 'path') out.push(h('p', { class: 'insp-note' }, `Outline from ${f.source || 'the file'}, ${ol.pts.length} points. Switch to a rectangle or circle to size it here.`));
+    out.push(section('board', 'Board', out.splice(mark)));
+  }
+
+  // Problems: refreshed in place as values change, so typing keeps its focus.
+  const list = h('ul', { class: 'board-issues', 'aria-live': 'polite' });
+  const fillIssues = () => {
+    const cur = featureById(f.id);
+    if (!cur) return;
+    const issues = checkBoard(cur, n);
+    const wires = airwires(numericBoard(cur, n));
+    const len = wires.filter((w) => !w.offBoard).reduce((sum, w) => sum + w.length, 0);
+    list.replaceChildren(
+      ...(issues.length ? issues : [{ kind: 'ok', refs: [], message: 'No clashes: every part is on the board, clear of the others, the edge and the holes.' }]).map((i) =>
+        h('li', { class: `bi-${i.kind}`, onclick: () => i.refs[0] && (act.editBoard(f.id), select({ shape: i.refs[0] })) }, i.message),
+      ),
+      h('li', { class: 'bi-info' }, wires.length ? `${(cur.nets || []).length} nets; ${wires.length} connection${wires.length === 1 ? '' : 's'} (${Math.round(len)} mm) still to route.` : `${(cur.nets || []).length} nets, all routed.`),
+    );
+  };
+  refreshers.push(fillIssues);
+  fillIssues();
+  out.push(section('placement', 'Placement', [list, h('div', { class: 'insp-actions' }, h('button', {
           class: 'btn small',
           type: 'button',
           title: 'Set part heights from a sizes list, BOM or notes: any line naming a part (U4) with L x W x H in mm',
@@ -715,31 +724,7 @@ function boardRows(f, setter) {
             document.body.append(input);
             input.click();
           },
-        }, 'Heights from a file…'),
-      ),
-      ...fieldRows(f, FEATURES.board.fields, setter, 'f'),
-    );
-    if (ol.kind === 'path') out.push(h('p', { class: 'insp-note' }, `Outline from ${f.source || 'the file'}, ${ol.pts.length} points. Switch to a rectangle or circle to size it here.`));
-  }
-
-  // Problems: refreshed in place as values change, so typing keeps its focus.
-  const list = h('ul', { class: 'board-issues', 'aria-live': 'polite' });
-  const fillIssues = () => {
-    const cur = featureById(f.id);
-    if (!cur) return;
-    const issues = checkBoard(cur, n);
-    const wires = airwires(numericBoard(cur, n));
-    const len = wires.filter((w) => !w.offBoard).reduce((sum, w) => sum + w.length, 0);
-    list.replaceChildren(
-      ...(issues.length ? issues : [{ kind: 'ok', refs: [], message: 'No clashes: every part is on the board, clear of the others, the edge and the holes.' }]).map((i) =>
-        h('li', { class: `bi-${i.kind}`, onclick: () => i.refs[0] && (act.editBoard(f.id), select({ shape: i.refs[0] })) }, i.message),
-      ),
-      h('li', { class: 'bi-info' }, wires.length ? `${(cur.nets || []).length} nets; ${wires.length} connection${wires.length === 1 ? '' : 's'} (${Math.round(len)} mm) still to route.` : `${(cur.nets || []).length} nets, all routed.`),
-    );
-  };
-  refreshers.push(fillIssues);
-  fillIssues();
-  out.push(h('h3', { class: 'insp-sub' }, 'Placement check'), list);
+        }, 'Heights from a file…'))]));
 
   // Copper: design rules, their check, and the autorouter.
   const rules = rulesOf(f);
@@ -765,7 +750,7 @@ function boardRows(f, setter) {
   refreshers.push(fillDrc);
   fillDrc();
   out.push(
-    h('h3', { class: 'insp-sub' }, 'Routing'),
+    section('routing', 'Routing', [
     h(
       'div',
       { class: 'rules-grid' },
@@ -796,7 +781,74 @@ function boardRows(f, setter) {
       'div',
       { class: 'insp-actions' },
       h('button', { class: 'btn small', type: 'button', title: 'Route every connection that is not routed yet, keeping the traces already there', onclick: () => (act.editBoard(f.id), act.app.board?.autoroute()) }, 'Autoroute'),
-      h('button', { class: 'btn small', type: 'button', title: 'Remove every trace and via', onclick: () => editIn((x) => ((x.traces = []), (x.vias = [])), null) }, 'Remove copper'),
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        title: 'Remove every trace and via',
+        onclick: () => {
+          const count = (featureById(f.id).traces || []).length;
+          editIn((x) => ((x.traces = []), (x.vias = [])), null);
+          toast(`Removed ${count} trace${count === 1 ? '' : 's'} and their vias. Undo (Ctrl+Z) brings them back.`);
+        },
+      }, 'Remove copper'),
+    ),
+    ]),
+  );
+  const fit = h('ul', { class: 'board-issues' });
+  out.push(
+    section('enclosure', 'Enclosure', [
+      h('p', { class: 'insp-note' }, 'Shape the board to the enclosure around it, check that the parts clear it, and print posts to hold it.'),
+      h(
+        'div',
+        { class: 'insp-actions' },
+        h('button', {
+          class: 'btn small',
+          type: 'button',
+          title: 'Shape the board to the inside of the enclosure at the board\'s height, 1 mm clear of the wall',
+          onclick: async () => {
+            const at = (f.at || [0, 0, 0]).map(n);
+            try {
+              const res = await act.app.kernel.fitBoard({ at, th: n(f.thickness ?? 1.6), clearance: 1 });
+              editIn((x) => (x.outline = res.outline), null);
+              toast(res.outline.kind === 'circle' ? `The enclosure is ${fmt(res.wall.d, 2)} mm across inside at this height; the board is now ${fmt(res.outline.d, 2)} mm round.` : `The board now follows the inside of the enclosure, 1 mm clear of the wall (${res.outline.pts.length} points).`);
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+          },
+        }, 'Fit outline to enclosure'),
+        h('button', {
+          class: 'btn small',
+          type: 'button',
+          title: 'Printed mounting posts under each hole, from the enclosure below up to the board, with a pilot hole for the screw',
+          onclick: async () => {
+            const res = await act.addStandoffs(f.id);
+            if (res.error) return toast(res.error, 'error');
+            toast(`Added ${res.added} standoff${res.added === 1 ? '' : 's'}, joined to the enclosure below, with ${res.added === 1 ? 'a pilot hole' : 'pilot holes'} for self-tapping screws.${res.nothingBelow.length ? ` Nothing is under hole${res.nothingBelow.length === 1 ? '' : 's'} ${res.nothingBelow.join(', ')}, so ${res.nothingBelow.length === 1 ? 'it has' : 'they have'} none.` : ''}${res.skipped.length ? ` Holes ${res.skipped.join(', ')} sit right on a surface.` : ''}`);
+          },
+        }, 'Add standoffs'),
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        title: 'Test every part against the other bodies (an enclosure) for collisions and tight gaps',
+        onclick: async () => {
+          fit.replaceChildren(h('li', { class: 'bi-info' }, 'Checking…'));
+          try {
+            const res = await act.app.kernel.interference({ board: f.id, clearance: 0.5 });
+            fit.replaceChildren(
+              ...(res.bodies ? (res.issues.length ? res.issues.map((i) => h('li', { class: i.kind === 'collides' ? 'bi-overlap' : 'bi-edge' }, i.kind === 'collides' ? `${i.part} runs into ${i.body} (${fmt(i.volume, 1)} mm³ overlap).` : `${i.part} is ${fmt(i.distance, 2)} mm from ${i.body}${i.approximate ? ' (measured on the mesh)' : ''}.`)) : [h('li', { class: 'bi-ok' }, `Fits: no part touches or comes within 0.5 mm of ${res.bodies === 1 ? 'the other body' : `the ${res.bodies} other bodies`}.`)]) : [h('li', { class: 'bi-info' }, 'There is nothing else in the model to check against yet. Import or model the enclosure.')]),
+            );
+          } catch (e) {
+            fit.replaceChildren(h('li', { class: 'bi-overlap' }, e.message));
+          }
+        },
+      }, 'Check fit in enclosure'),
+      ),
+      fit,
+    ]),
+    section('export', 'Export', [
+      h(
+        'div',
+        { class: 'insp-actions' },
       h('button', {
         class: 'btn small',
         type: 'button',
@@ -821,29 +873,6 @@ function boardRows(f, setter) {
           if (msg) toast(msg);
         },
       }, 'BOM (.csv)'),
-    ),
-  );
-  const fit = h('ul', { class: 'board-issues' });
-  out.push(
-    h(
-      'div',
-      { class: 'insp-actions' },
-      h('button', {
-        class: 'btn small',
-        type: 'button',
-        title: 'Test every part against the other bodies (an enclosure) for collisions and tight gaps',
-        onclick: async () => {
-          fit.replaceChildren(h('li', { class: 'bi-info' }, 'Checking…'));
-          try {
-            const res = await act.app.kernel.interference({ board: f.id, clearance: 0.5 });
-            fit.replaceChildren(
-              ...(res.bodies ? (res.issues.length ? res.issues.map((i) => h('li', { class: i.kind === 'collides' ? 'bi-overlap' : 'bi-edge' }, i.kind === 'collides' ? `${i.part} runs into ${i.body} (${fmt(i.volume, 1)} mm³ overlap).` : `${i.part} is ${fmt(i.distance, 2)} mm from ${i.body}${i.approximate ? ' (measured on the mesh)' : ''}.`)) : [h('li', { class: 'bi-ok' }, `Fits: no part touches or comes within 0.5 mm of ${res.bodies === 1 ? 'the other body' : `the ${res.bodies} other bodies`}.`)]) : [h('li', { class: 'bi-info' }, 'There is nothing else in the model to check against yet. Import or model the enclosure.')]),
-            );
-          } catch (e) {
-            fit.replaceChildren(h('li', { class: 'bi-overlap' }, e.message));
-          }
-        },
-      }, 'Check fit in enclosure'),
       h('button', {
         class: 'btn small',
         type: 'button',
@@ -853,15 +882,15 @@ function boardRows(f, setter) {
           if (msg) toast(`${msg}. Run it in the Eagle / Fusion Electronics board editor (File > Execute Script).`);
         },
       }, 'Export to Eagle (.scr)'),
-    ),
-    fit,
+      ),
+    ]),
   );
 
   // Every part, to find one quickly.
   const parts = f.parts || [];
   if (parts.length)
     out.push(
-      h('h3', { class: 'insp-sub' }, `Parts (${parts.filter((p) => !p.off).length} of ${parts.length} placed)`),
+      section('parts', `Parts (${parts.filter((p) => !p.off).length} of ${parts.length} placed)`, [
       h(
         'table',
         { class: 'bodies board-parts' },
@@ -880,6 +909,7 @@ function boardRows(f, setter) {
           ),
         ),
       ),
+      ]),
     );
   return out;
 }
@@ -906,6 +936,12 @@ function renderInspector(force = false) {
   const box = $('inspector');
   const { mode, sel } = store;
   const info = store.results?.features || {};
+  const showing = `${sel.feature}|${mode.kind}|${sel.shape}`;
+  if (showing !== inspectorShowing) {
+    inspectorShowing = showing;
+    requestAnimationFrame(() => (box.scrollTop = 0));
+  }
+  box.classList.toggle('tall', featureById(sel.feature)?.type === 'board');
 
   // A shape inside the open sketch.
   if (mode.kind === 'sketch') {
@@ -963,6 +999,9 @@ function renderInspector(force = false) {
       err ? h('div', { class: 'insp-error', role: 'alert' }, h('span', { html: ICON.warn }), h('span', {}, err)) : null,
       f.suppressed ? h('div', { class: 'insp-warn' }, 'Suppressed: this feature is skipped until you turn it back on.') : null,
       !err && info[f.id]?.note && f.type !== 'board' ? h('p', { class: 'insp-note' }, info[f.id].note) : null,
+      f.type === 'board' && f.notes?.length && !sel.shape
+        ? h('div', { class: 'insp-notes' }, h('ul', {}, f.notes.map((t) => h('li', {}, t))), h('button', { class: 'link-btn', type: 'button', onclick: () => update((doc) => delete doc.features.find((x) => x.id === f.id).notes, { quiet: true }) }, 'Dismiss'))
+        : null,
       ...(f.type === 'board' ? boardRows(f, setter) : fieldRows(f, def.fields, setter, 'f')),
       ...(f.type === 'import' || f.type === 'board' ? lineUpRows(f, setter) : []),
     ];
