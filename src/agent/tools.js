@@ -12,7 +12,7 @@ import { evalExpr } from '../expr.js';
 import { checkBoard, overBoard, turnPart, flipPart, bodyCenter } from '../board/geometry.js';
 import { arrangeBoard, improvePlacement } from '../board/placement.js';
 import { airwires, drc, numericBoard, rulesOf, copperLength } from '../board/route.js';
-import { fabFiles } from '../board/gerber.js';
+import { fabFiles, bomCSV } from '../board/gerber.js';
 import { zip } from '../export.js';
 import { eagleScript } from '../board/script.js';
 
@@ -464,7 +464,11 @@ const IMPL = {
       name = `${base2}-gerbers.zip`;
       bytes = new Uint8Array(await zip(fabFiles(nb, base2).map((x) => ({ name: x.name, data: new TextEncoder().encode(x.data) }))).arrayBuffer());
       note = `Gerber and drill files for ${featureLabel(b)}${res.unrouted ? `; WARNING: ${res.unrouted} connections are not routed` : ''}${res.issues.length ? `; WARNING: ${res.issues.length} design-rule errors` : ''}. Check them in a Gerber viewer before ordering.`;
-    } else return fail('format must be stl, step, project, eagle_script or gerber.');
+    } else if (args.format === 'bom') {
+      const b = findBoard(args.board);
+      name = `${safeName(featureLabel(b))}-bom.csv`;
+      bytes = new TextEncoder().encode(bomCSV(b));
+    } else return fail('format must be stl, step, project, eagle_script, gerber or bom.');
     logActivity(ctx.by, `exported ${name}`);
     if (ctx.transport === 'bridge') return { content: [text({ file: name, bytes: bytes.length, ...(note ? { note } : {}) })], files: [{ name, path: args.path || null, data: toB64(bytes) }] };
     const msg = await saveFile(name, bytes, 'application/octet-stream');
@@ -583,6 +587,12 @@ IMPL.place_parts = async (args, ctx) => {
   );
   const res = await act.app.rebuildNow();
   const err = res?.features?.[b.id]?.error;
+  let standoffs = null;
+  if (args.add_standoffs) {
+    const o = args.add_standoffs === true ? {} : args.add_standoffs;
+    standoffs = await act.addStandoffs(b.id, { wall: o.wall ?? 1.8, screw: o.screw ?? null, by: ctx.by });
+    if (standoffs.error) problems.push(standoffs.error);
+  }
   let fitted = null;
   if (args.fit_outline) {
     const cur = featureById(b.id);
@@ -601,6 +611,7 @@ IMPL.place_parts = async (args, ctx) => {
   return ok(
     text({
       changed,
+      ...(standoffs && !standoffs.error ? { standoffs } : {}),
       ...(fitted ? { fitted_outline: fitted.outline, ...(fitted.wall ? { enclosure_inside: fitted.wall } : {}), sliced_at_z: Math.round(fitted.z * 100) / 100 } : {}),
       ...(arranged ? { arranged } : {}),
       ...(problems.length ? { problems_with_request: problems } : {}),

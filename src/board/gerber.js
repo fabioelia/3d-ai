@@ -169,11 +169,14 @@ export function fabFiles(b, base = 'board') {
   files.push({ name: `${base}-PTH.drl`, data: drill('Plated holes', pth) });
   if ((b.holes || []).length) files.push({ name: `${base}-NPTH.drl`, data: drill('Unplated holes', b.holes) });
   const bb = outline.reduce((a, p) => [Math.min(a[0], p[0]), Math.min(a[1], p[1]), Math.max(a[2], p[0]), Math.max(a[3], p[1])], [Infinity, Infinity, -Infinity, -Infinity]);
+  files.push({ name: `${base}-bom.csv`, data: bomCSV(b) });
+  files.push({ name: `${base}-positions.csv`, data: positionsCSV(b) });
   files.push({
     name: `${base}-README.txt`,
     data: [
       `${base}: two-layer board, ${f3(bb[2] - bb[0])} x ${f3(bb[3] - bb[1])} mm, ${b.thickness ?? 1.6} mm thick, exported by Caliper.`,
       'Files: F_Cu/B_Cu copper (pours with thermal reliefs), F_Mask/B_Mask solder mask (vias tented), F_Silkscreen/B_Silkscreen part outlines and references, Edge_Cuts outline, PTH and NPTH Excellon drills (mm).',
+      'bom.csv lists the parts; positions.csv gives each part\'s centre, rotation and side for assembly.',
       'Coordinates are in millimetres, format 4.6. Check the files in a Gerber viewer before ordering.',
       '',
     ].join('\n'),
@@ -182,3 +185,28 @@ export function fabFiles(b, base = 'board') {
 }
 
 const xy = (p) => ({ x: p[0], y: p[1] });
+
+const csv = (rows) => rows.map((r) => r.map((v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v))).join(',')).join('\n') + '\n';
+
+// Bill of materials: parts grouped by value and package.
+export function bomCSV(b) {
+  const groups = new Map();
+  for (const p of b.parts || []) {
+    const key = `${p.value || ''}|${p.package || ''}`;
+    if (!groups.has(key)) groups.set(key, { value: p.value || '', package: p.package || '', refs: [] });
+    groups.get(key).refs.push(p.ref);
+  }
+  const natural = (a, c) => a.localeCompare(c, undefined, { numeric: true });
+  const rows = [...groups.values()].map((x) => [x.refs.length, x.value, x.package, x.refs.sort(natural).join(' ')]).sort((a, c) => natural(a[3], c[3]));
+  return csv([['Qty', 'Value', 'Package', 'References'], ...rows]);
+}
+
+// Where each placed part goes, for assembly (centre of its body, rotation, side).
+export function positionsCSV(b) {
+  const r3 = (v) => (Math.round(v * 1000) / 1000).toFixed(3);
+  const rows = (b.parts || []).filter((p) => !p.off).map((p) => {
+    const c = bodyCenter(p);
+    return [p.ref, p.value || '', p.package || '', r3(c[0]), r3(c[1]), r3(((Number(p.rot) || 0) % 360 + 360) % 360), p.side === 'bottom' ? 'bottom' : 'top'];
+  });
+  return csv([['Ref', 'Value', 'Package', 'PosX', 'PosY', 'Rot', 'Side'], ...rows]);
+}

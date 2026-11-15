@@ -107,6 +107,10 @@ export class Kernel {
     return this.call('autoroute', { board, opts });
   }
 
+  surfaceBelow(points) {
+    return this.call('below', { points });
+  }
+
   fitBoard(opts) {
     return this.call('fitboard', { opts });
   }

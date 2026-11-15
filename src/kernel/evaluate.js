@@ -1488,5 +1488,34 @@ export function createKernel(r) {
     return best;
   }
 
-  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference, fitBoard };
+  // The highest surface of the other bodies straight below each point (x, y, from z down), or null.
+  function surfaceBelow(points) {
+    const others = lastState.bodies.filter((b) => !b.kind);
+    const tris = others.map((b) => ({ t: topo(b.shape), m: bodyTriangles(b) }));
+    return points.map(([x, y, z]) => {
+      let best = null;
+      for (const { t, m } of tris) {
+        if (x < t.min[0] || x > t.max[0] || y < t.min[1] || y > t.max[1] || t.min[2] > z) continue;
+        const V = m.vertices;
+        const T = m.triangles;
+        for (let i = 0; i < T.length; i += 3) {
+          const a = T[i] * 3;
+          const b = T[i + 1] * 3;
+          const c = T[i + 2] * 3;
+          // Barycentric test in plan, then the height of the triangle there.
+          const d = (V[b + 1] - V[c + 1]) * (V[a] - V[c]) + (V[c] - V[b]) * (V[a + 1] - V[c + 1]);
+          if (Math.abs(d) < 1e-12) continue;
+          const l1 = ((V[b + 1] - V[c + 1]) * (x - V[c]) + (V[c] - V[b]) * (y - V[c + 1])) / d;
+          const l2 = ((V[c + 1] - V[a + 1]) * (x - V[c]) + (V[a] - V[c]) * (y - V[c + 1])) / d;
+          const l3 = 1 - l1 - l2;
+          if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9) continue;
+          const hz = l1 * V[a + 2] + l2 * V[b + 2] + l3 * V[c + 2];
+          if (hz <= z + 1e-6 && (best === null || hz > best.z)) best = { z: hz, body: others[tris.findIndex((q) => q.m === m)].id };
+        }
+      }
+      return best;
+    });
+  }
+
+  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference, fitBoard, surfaceBelow };
 }

@@ -8,7 +8,8 @@ import { footprintFromName, partFamily } from '../src/board/footprints.js';
 import { padPositions, boardPolygon, autoPlace, checkBoard } from '../src/board/geometry.js';
 import { arrangeBoard, improvePlacement } from '../src/board/placement.js';
 import { airwires, connectivity, drc, autorouteBest, numericBoard } from '../src/board/route.js';
-import { fabFiles } from '../src/board/gerber.js';
+import { fabFiles, bomCSV } from '../src/board/gerber.js';
+import { readSizes } from '../src/board/sizes.js';
 import { parseSexpr } from '../src/board/sexpr.js';
 
 let failed = 0;
@@ -114,6 +115,12 @@ const silkTop = files.find((f) => f.name.endsWith('F_Silkscreen.gto')).data;
 const strokes = (silkTop.match(/D02\*/g) || []).length;
 ok(strokes > A.parts.filter((p) => p.side !== 'bottom').length * 3, `the silkscreen carries outlines and reference text (${strokes} strokes)`);
 
+const bom = bomCSV({ parts: [{ ref: 'R2', value: '10k', package: '0207' }, { ref: 'R10', value: '10k', package: '0207' }, { ref: 'R1', value: '10k', package: '0207' }, { ref: 'U1', value: 'ESP32, rev "B"', package: 'MOD' }] });
+ok(bom === 'Qty,Value,Package,References\n3,10k,0207,R1 R2 R10\n1,"ESP32, rev ""B""",MOD,U1\n', `the BOM groups parts and quotes what needs it (${JSON.stringify(bom)})`);
+ok(names.includes('demo-bom.csv') && names.includes('demo-positions.csv') && /U1,Sensor,MOD_20X15,/.test(files.find((f) => f.name.endsWith('positions.csv')).data), 'the fab zip also has the BOM and part positions');
+const sizes = readSizes('U4   | Seeed XIAO ESP32S3 | 21 x 17.8 x ~3.5 | MAKER\nU9 | microSD | ~45 x 24 x 8\nR1, R2 | body ~6.3 x 2.5\n   | alternative | 18 x 21 x 12\nU4 again | 1 x 1 x 1\nU77 | 5 x 5 x 5', ['U4', 'U9', 'R1', 'R2']);
+ok(JSON.stringify(sizes.map((x) => [x.ref, x.h])) === '[["U4",3.5],["U9",8]]', `heights from a sizes list: first mention wins, unknown parts and two-number sizes are skipped (${JSON.stringify(sizes.map((x) => [x.ref, x.h]))})`);
+
 // ---------- 3D models ----------
 const k = await loadKernel();
 const brd = { id: 'pcb', type: 'board', ...readEagle(fixture('demo.brd'), 'demo.brd').props, traces: A.traces, vias: A.vias };
@@ -203,6 +210,8 @@ const tube = [
   { id: 'bore', type: 'cylinder', d: 62, h: 52, at: [0, 0, 2], op: 'cut' },
 ];
 k.evaluate({ features: [...tube, { id: 'pcb', type: 'board', outline: { kind: 'rect', w: 30, h: 30 }, at: [0, 0, 20], parts: [], nets: [] }] });
+const below = k.surfaceBelow([[10, 5, 20], [100, 0, 20]]);
+ok(below[0] && near(below[0].z, 2, 0.01) && below[1] === null, `the floor under a point is found, and nothing outside (${JSON.stringify(below)})`);
 let fit = k.fitBoard({ at: [0, 0, 20], th: 1.6, clearance: 1 });
 ok(fit.outline.kind === 'circle' && near(fit.outline.d, 60, 0.15) && near(fit.wall.d, 62, 0.15), `a round enclosure gives a round board, 1 mm clear of the wall (${JSON.stringify(fit)})`);
 k.evaluate({ features: [{ id: 'boxy', type: 'box', w: 50, d: 30, h: 40, op: 'new' }, { id: 'pocket', type: 'box', w: 46, d: 26, h: 40, at: [0, 0, 3], op: 'cut' }] });

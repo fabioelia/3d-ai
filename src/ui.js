@@ -5,7 +5,8 @@ import { FEATURES, SHAPES, EDGE_PRESETS, FACE_PRESETS, MAKES_TOOL, featureLabel 
 import * as act from './actions.js';
 import { checkBoard, flipPart } from './board/geometry.js';
 import { airwires, drc, numericBoard, rulesOf, RULES, copperLength } from './board/route.js';
-import { fabFiles } from './board/gerber.js';
+import { fabFiles, bomCSV } from './board/gerber.js';
+import { readSizes } from './board/sizes.js';
 import { zip } from './export.js';
 import { eagleScript } from './board/script.js';
 import { GRIDS } from './board/editor.js';
@@ -656,6 +657,40 @@ function boardRows(f, setter) {
             }
           },
         }, 'Fit outline to enclosure'),
+        h('button', {
+          class: 'btn small',
+          type: 'button',
+          title: 'Printed mounting posts under each hole, from the enclosure below up to the board, with a pilot hole for the screw',
+          onclick: async () => {
+            const res = await act.addStandoffs(f.id);
+            if (res.error) return toast(res.error, 'error');
+            toast(`Added ${res.added} standoff${res.added === 1 ? '' : 's'}${res.onSurface < res.added ? ` (${res.added - res.onSurface} start on the bed: nothing is under them)` : ', joined to the enclosure'}, with ${res.added === 1 ? 'a pilot hole' : 'pilot holes'} for self-tapping screws.${res.skipped.length ? ` Holes ${res.skipped.join(', ')} sit right on a surface.` : ''}`);
+          },
+        }, 'Add standoffs'),
+        h('button', {
+          class: 'btn small',
+          type: 'button',
+          title: 'Set part heights from a sizes list, BOM or notes: any line naming a part (U4) with L x W x H in mm',
+          onclick: () => {
+            const input = h('input', { type: 'file', accept: '.txt,.csv,.tsv,.md,text/plain', hidden: true });
+            input.addEventListener('change', async () => {
+              const file = input.files[0];
+              input.remove();
+              if (!file) return;
+              const found = readSizes(await file.text(), (f.parts || []).map((p) => p.ref));
+              if (!found.length) return toast(`${file.name} has no lines that name a part of this board with a size like "21 x 17.8 x 3.5".`, 'error');
+              editIn((x) => {
+                for (const s2 of found) {
+                  const p = x.parts.find((q) => q.ref === s2.ref);
+                  if (p) p.h = s2.h;
+                }
+              }, null);
+              toast(`Heights from ${file.name}: ${found.map((s2) => `${s2.ref} ${s2.h}`).join(', ')} mm. Modules on pin headers also need their Lift (about 8.5 mm).`);
+            });
+            document.body.append(input);
+            input.click();
+          },
+        }, 'Heights from a file…'),
       ),
       ...fieldRows(f, FEATURES.board.fields, setter, 'f'),
     );
@@ -752,6 +787,15 @@ function boardRows(f, setter) {
           if (msg) toast(`${msg}.${res.unrouted ? ` Note: ${res.unrouted} connections are not routed yet.` : ''}${res.issues.length ? ` ${res.issues.length} design-rule errors remain.` : ''} Check the files in a Gerber viewer before ordering.`, res.unrouted || res.issues.length ? 'error' : 'info');
         },
       }, 'Export Gerbers'),
+      h('button', {
+        class: 'btn small',
+        type: 'button',
+        title: 'Bill of materials: every part, grouped by value and package, with references and quantities',
+        onclick: async () => {
+          const msg = await saveFile(`${safeName(featureLabel(f))}-bom.csv`, bomCSV(featureById(f.id)), 'text/csv');
+          if (msg) toast(msg);
+        },
+      }, 'BOM (.csv)'),
     ),
   );
   const fit = h('ul', { class: 'board-issues' });

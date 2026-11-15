@@ -53,6 +53,8 @@ self.onmessage = async ({ data }) => {
       result = kernel.measure(data.a, data.b);
     } else if (type === 'autoroute') {
       result = autorouteBest(data.board, data.opts || {});
+    } else if (type === 'below') {
+      result = kernel.surfaceBelow(data.points);
     } else if (type === 'fitboard') {
       result = kernel.fitBoard(data.opts);
     } else if (type === 'interference') {

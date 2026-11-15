@@ -172,6 +172,48 @@ export function addBoardPart(boardId) {
   return ref;
 }
 
+// Mounting posts for a board, printed with the enclosure: one under each hole, from the surface below
+// up to the board, with a pilot hole for a screw. One undo step.
+export async function addStandoffs(boardId, { wall = 1.8, screw = null, by = 'user' } = {}) {
+  const f = featureById(boardId);
+  if (!f || f.type !== 'board') return { error: 'There is no such board.' };
+  const { evalExpr } = await import('./expr.js');
+  const n = (v) => evalExpr(v ?? 0, store.results?.params || {});
+  const rot = (f.rot || [0, 0, 0]).map(n);
+  if (rot.some((v) => Math.abs(v) > 1e-6)) return { error: 'Standoffs are made for a board lying flat (rotation 0, 0, 0).' };
+  const holes = (f.holes || []).map((h) => ({ x: n(h.x), y: n(h.y), d: n(h.d) }));
+  if (!holes.length) return { error: 'The board has no mounting holes yet. Add them in the placement editor (H), or with the Hole tool.' };
+  const at = (f.at || [0, 0, 0]).map(n);
+  const hits = await app.kernel.surfaceBelow(holes.map((h) => [at[0] + h.x, at[1] + h.y, at[2] - 0.01]));
+  const added = [];
+  const skipped = [];
+  const r3 = (v) => Math.round(v * 1000) / 1000;
+  update(
+    (doc) => {
+      holes.forEach((h, i) => {
+        const base = hits[i] ? hits[i].z : 0;
+        const height = r3(at[2] - base);
+        if (height < 0.5) {
+          skipped.push(i + 1);
+          return;
+        }
+        const x = r3(at[0] + h.x);
+        const y = r3(at[1] + h.y);
+        const d = r3(Math.max(5, h.d + 2 * wall));
+        const pilot = r3(screw ?? Math.round(h.d * 0.78 * 10) / 10);
+        const depth = r3(Math.min(height, 8));
+        const post = { id: newFeatureId('cylinder'), type: 'cylinder', name: `Standoff ${i + 1}`, d, h: height, at: [x, y, r3(base)], op: hits[i] ? 'join' : 'new' };
+        const bore = { id: newFeatureId('cylinder'), type: 'cylinder', name: `Screw hole ${i + 1}`, d: pilot, h: depth, at: [x, y, r3(at[2] - depth)], op: 'cut' };
+        doc.features.push(post, bore);
+        added.push(post.id, bore.id);
+      });
+    },
+    { by, key: `standoffs:${Date.now()}` },
+  );
+  await app.rebuildNow();
+  return { added: added.length / 2, skipped, onSurface: hits.filter(Boolean).length };
+}
+
 export function startPick(feature, key, kind) {
   if (store.mode.kind === 'sketch') finishSketch();
   select({ feature, picks: [] });

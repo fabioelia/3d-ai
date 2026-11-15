@@ -175,6 +175,24 @@ const ok = (c, m) => {
   issues = await p.$$eval('.board-issues', (els) => els.map((e) => e.textContent).join(' | '));
   ok(/runs into/.test(issues), `the fit check finds parts running into the lid (${issues.slice(-160)})`);
 
+  // --- standoffs under the board's holes, joined to the lid's... floor below
+  await p.evaluate(() => {
+    const id = window.caliper.store.doc.features.find((f) => f.type === 'board').id;
+    window.caliper.act.addFeature('box', { w: 90, d: 90, h: 2, at: [0, 0, -12], op: 'new' });
+    window.caliper.store.doc.features.find((f) => f.id === id).holes = [{ x: 10, y: 10, d: 3.2 }];
+  });
+  await settle();
+  const so = await p.evaluate(async () => window.caliper.act.addStandoffs(window.caliper.store.doc.features.find((f) => f.type === 'board').id));
+  await settle();
+  const posts = await p.evaluate(() => window.caliper.store.doc.features.filter((f) => /^Standoff|^Screw hole/.test(f.name)).map((f) => ({ name: f.name, h: f.h, at: f.at, op: f.op })));
+  ok(so.added === 1 && posts.length === 2 && Math.abs(posts[0].at[2] - -10) < 0.01 && Math.abs(posts[0].h - 10) < 0.01 && posts[1].op === 'cut', `a standoff rises from the floor below to the board, with a screw hole (${JSON.stringify(posts)})`);
+  await p.evaluate(() => window.caliper.undo?.() || document.getElementById('undo').click());
+  await p.evaluate(() => {
+    const s = window.caliper.store;
+    s.doc.features = s.doc.features.filter((f) => !/^Standoff|^Screw hole|^Box 2/.test(f.name));
+  });
+  await settle();
+
   // --- STL export leaves the electronics out
   const tri = await p.evaluate(async () => (await window.caliper.act.app.kernel.exportSTL(null, 'draft')).triangles);
   ok(tri === 12, `STL export holds only the printable body (${tri} triangles)`);

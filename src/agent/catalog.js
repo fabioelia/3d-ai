@@ -238,12 +238,12 @@ export const TOOLS = [
     name: 'export_file',
     title: 'Export a file',
     description:
-      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor; or gerber: a zip of Gerber copper, mask, silkscreen and outline layers plus Excellon drill files for a board house (the note warns about unrouted connections and design-rule errors). Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
+      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor; gerber: a zip of Gerber copper, mask, silkscreen and outline layers, Excellon drill files, a BOM and a part-positions file for a board house; or bom: the bill of materials as CSV (the note warns about unrouted connections and design-rule errors). Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
     inputSchema: {
       type: 'object',
       properties: {
-        format: { type: 'string', enum: ['stl', 'step', 'project', 'eagle_script', 'gerber'] },
-        board: { type: 'string', description: 'With eagle_script or gerber: which board (default: the open or only one).' },
+        format: { type: 'string', enum: ['stl', 'step', 'project', 'eagle_script', 'gerber', 'bom'] },
+        board: { type: 'string', description: 'With eagle_script, gerber or bom: which board (default: the open or only one).' },
         path: { type: 'string' },
         quality: { type: 'string', enum: ['draft', 'standard', 'fine'], default: 'standard' },
         bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids to include (default: all).' },
@@ -269,6 +269,7 @@ export const TOOLS = [
         margin: { type: 'number', default: 1, description: 'Space from the board edge when arranging (mm).' },
         outline: { type: 'object', description: '{"kind":"rect","w":60,"h":40,"r":2} or {"kind":"circle","d":58} or {"kind":"path","pts":[[x,y],…]}; x/y shift rect and circle.' },
         fit_outline: { description: 'true, or {clearance, body}: shape the board to the inside of the enclosure (the other bodies) at the board\'s height, clearance mm (default 1) in from the wall. Runs after the other changes here (so set "at" in the same call), and before "arrange".', anyOf: [{ type: 'boolean' }, { type: 'object', properties: { clearance: { type: 'number' }, body: { type: 'string' } } }] },
+        add_standoffs: { description: 'true, or {wall, screw}: add printed mounting posts (cylinder features joined to the enclosure) under each board hole, from the surface below up to the board, with a pilot hole for a self-tapping screw (default 0.78 × the hole). Do this once the board sits where it should in the enclosure.', anyOf: [{ type: 'boolean' }, { type: 'object', properties: { wall: { type: 'number' }, screw: { type: 'number' } } }] },
         thickness: { type: ['number', 'string'] },
         holes: { type: 'array', items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, d: { type: 'number' } } }, description: 'Replaces all mounting holes.' },
         at: { ...vec3, description: 'Where the board origin sits in the model; its underside is at z.' },
