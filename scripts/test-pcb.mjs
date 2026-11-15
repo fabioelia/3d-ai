@@ -110,6 +110,9 @@ const holes = (pth.match(/^X/gm) || []).length;
 const expected = A.parts.reduce((s, p) => s + Object.values(p.pads).filter((q) => q.length < 5).length, 0) + A.vias.length;
 ok(/^M48/.test(pth) && /METRIC/.test(pth) && holes === expected, `plated drill file: a hit per through-hole pad and via (${holes} of ${expected})`);
 ok(/X4\.000Y4\.000/.test(files.find((f) => f.name.endsWith('NPTH.drl')).data), 'unplated drill file: the mounting holes');
+const silkTop = files.find((f) => f.name.endsWith('F_Silkscreen.gto')).data;
+const strokes = (silkTop.match(/D02\*/g) || []).length;
+ok(strokes > A.parts.filter((p) => p.side !== 'bottom').length * 3, `the silkscreen carries outlines and reference text (${strokes} strokes)`);
 
 // ---------- 3D models ----------
 const k = await loadKernel();
@@ -149,6 +152,9 @@ ok(airwires(G).some((w) => w.net === 'VCC'), 'other nets still need routing');
 const grid = pc.pours[0].grid;
 const vccPad = pc.items.find((i) => i.id === 'U1.1');
 ok(grid.touching(vccPad.shape).size === 0, 'the pour keeps clear of other nets\' pads');
+const therm = pc.pours[0].grid.thermals;
+ok(therm.has('U1.2') && therm.get('U1.2').length >= 2 && therm.get('U1.2').every((sp) => sp.w === 0.5), `GND through-hole pads join the pour by thermal spokes (${therm.get('U1.2')?.length} spokes)`);
+ok(pc.pours[0].grid.touching({ a: pc.items.find((i) => i.id === 'U1.2').at, b: pc.items.find((i) => i.id === 'U1.2').at, r: 0.95 }).size === 0, 'with a ring of clearance around them');
 const Gr = autorouteBest(G);
 G.traces = Gr.traces;
 G.vias = Gr.vias;

@@ -1,7 +1,9 @@
 // Fabrication files for a routed two-layer board: Gerber (RS-274X) copper, solder mask, silkscreen
 // and outline, and Excellon drill files, named the way KiCad names them so board houses recognise
 // them. Silkscreen carries part outlines only (no text).
-import { boardPolygon, partPolygon, toBoard, insetPolygon } from './geometry.js';
+import { boardPolygon, partPolygon, toBoard, insetPolygon, bodyCenter } from './geometry.js';
+import { strokeText } from './font.js';
+import { bounds } from '../sketchgeo.js';
 import { connectivity, rulesOf } from './route.js';
 import { padShape } from './footprints.js';
 
@@ -110,7 +112,11 @@ export function fabFiles(b, base = 'board') {
         else g.line([s.a, s.b], 2 * (s.r + clear));
       }
       for (const h of b.holes || []) g.flash([h.x, h.y], h.d + 2 * clear);
+      const grid = conn.pours.find((x) => x.layer === layer && x.net === pr.net)?.grid;
+      // Thermal reliefs: a ring of clearance around the pour's own through-hole pads, then spokes.
+      for (const it of conn.items) if (grid?.thermals.has(it.id)) g.flash(it.shape.a, 2 * (it.shape.r + clear));
       g.polarity(true);
+      for (const sp of grid ? grid.spokes() : []) g.line([sp.a, sp.b], sp.w);
     }
   };
   const copper = (layer, grow) => (g) => {
@@ -126,8 +132,24 @@ export function fabFiles(b, base = 'board') {
     for (const t of b.traces || []) if ((t.layer === 'bottom' ? 'bottom' : 'top') === layer) g.line(t.pts, t.w || 0.25);
     for (const v of b.vias || []) g.flash([v.x, v.y], v.d || 0.6);
   };
+  // Part outlines and references, the reference along the long side of the part, read from its own
+  // side of the board (mirrored on the bottom).
   const silk = (layer) => (g) => {
-    for (const p of parts) if (side(p) === layer) g.line(partPolygon(p), 0.15, true);
+    for (const p of parts) {
+      if (side(p) !== layer) continue;
+      const poly = partPolygon(p);
+      g.line(poly, 0.15, true);
+      const bb = bounds(poly);
+      const w = bb.x1 - bb.x0;
+      const h = bb.y1 - bb.y0;
+      const turn = h > w * 1.2 ? 90 : 0;
+      const long = turn ? h : w;
+      const short = turn ? w : h;
+      const size = Math.max(0.8, Math.min(1.5, (long * 0.85) / (String(p.ref).length * 0.92), short * 0.6));
+      const c = bodyCenter(p);
+      const t = strokeText(p.ref, c[0], c[1], size, turn);
+      for (const line of t.lines) g.line(layer === 'bottom' ? line.map((q) => [2 * c[0] - q[0], q[1]]) : line, Math.max(0.12, size * 0.13));
+    }
   };
   const files = [
     { name: `${base}-F_Cu.gtl`, data: gerber('Top copper', copper('top', 0)) },
@@ -151,7 +173,7 @@ export function fabFiles(b, base = 'board') {
     name: `${base}-README.txt`,
     data: [
       `${base}: two-layer board, ${f3(bb[2] - bb[0])} x ${f3(bb[3] - bb[1])} mm, ${b.thickness ?? 1.6} mm thick, exported by Caliper.`,
-      'Files: F_Cu/B_Cu copper, F_Mask/B_Mask solder mask (vias tented), F_Silkscreen/B_Silkscreen part outlines, Edge_Cuts outline, PTH and NPTH Excellon drills (mm).',
+      'Files: F_Cu/B_Cu copper (pours with thermal reliefs), F_Mask/B_Mask solder mask (vias tented), F_Silkscreen/B_Silkscreen part outlines and references, Edge_Cuts outline, PTH and NPTH Excellon drills (mm).',
       'Coordinates are in millimetres, format 4.6. Check the files in a Gerber viewer before ordering.',
       '',
     ].join('\n'),

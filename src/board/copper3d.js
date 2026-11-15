@@ -64,6 +64,11 @@ export function copperMesh(b, th) {
       if (pour.layer === 'top') prism(poly, th, th + T * 0.5);
       else prism(poly, -T * 0.5, 0);
     }
+    for (const sp of pour.grid.spokes()) {
+      const poly = stadium(sp.a, sp.b, sp.w / 2, 2);
+      if (pour.layer === 'top') prism(poly, th, th + T * 0.5);
+      else prism(poly, -T * 0.5, 0);
+    }
   }
   for (const it of conn.items) {
     const poly = it.shape.poly || stadium(it.shape.a, it.shape.b, it.shape.r);

@@ -239,15 +239,17 @@ export class BoardEditor {
     // Copper: the far layer faint, then vias, then the near layer.
     // Connectivity (with pours) is reused while only the view or the cursor changes; pours are left
     // out while a part is being dragged.
-    const key = JSON.stringify(b) + (this.drag ? '|drag' : '');
-    if (this.connKey !== key) {
-      const nb0 = numericBoard(b, this.n);
+    // While a part is dragged, the copper drawn is what was there before (traces do not move with
+    // parts) and the airwires join pads directly, so dragging stays smooth on a routed board.
+    const dragging = this.drag && (this.drag.kind === 'part' || this.drag.kind === 'hole');
+    const key = dragging ? null : JSON.stringify(b);
+    if (!dragging && this.connKey !== key) {
       this.connKey = key;
-      this.nb = this.drag ? { ...nb0, pours: [] } : nb0;
+      this.nb = numericBoard(b, this.n);
       this.conn = connectivity(this.nb);
     }
-    const nb = this.nb;
-    const conn = this.conn;
+    const nb = this.nb || numericBoard(b, this.n);
+    const conn = this.conn || connectivity(nb);
     const sel = String(selected || '');
     const traceColor = { top: c.top, bottom: c.bottom };
     for (const layer of [flip ? 'top' : 'bottom', flip ? 'bottom' : 'top']) {
@@ -263,6 +265,8 @@ export class BoardEditor {
           d.push(`M${Math.min(a[0], z[0]).toFixed(1)},${a[1].toFixed(1)}H${Math.max(a[0], z[0]).toFixed(1)}V${z[1].toFixed(1)}H${Math.min(a[0], z[0]).toFixed(1)}Z`);
         }
         out.push(`<path d="${d.join('')}" fill="${traceColor[layer]}" opacity="${far ? 0.12 : 0.26}" pointer-events="none"/>`);
+        const spokes = pour.grid.spokes().map((sp) => `M${P(sp.a)[0].toFixed(1)},${P(sp.a)[1].toFixed(1)}L${P(sp.b)[0].toFixed(1)},${P(sp.b)[1].toFixed(1)}`);
+        if (spokes.length) out.push(`<path d="${spokes.join('')}" stroke="${traceColor[layer]}" stroke-width="${Math.max(1, (pour.grid.spokes()[0].w || 0.5) * view.s).toFixed(1)}" opacity="${far ? 0.25 : 0.6}" pointer-events="none"/>`);
       }
       (nb.traces || []).forEach((t, i) => {
         if ((t.layer === 'bottom' ? 'bottom' : 'top') !== layer) return;
@@ -283,7 +287,11 @@ export class BoardEditor {
     if (selTrace?.net) selNets.add(selTrace.net);
     if (selected && !sel.includes(':')) for (const net of b.nets || []) if ((net.pads || []).some(([r]) => r === selected)) selNets.add(net.name);
     if (this.route?.net) selNets.add(this.route.net);
-    const wires = this.wiresKey === key ? this.wires : airwires(nb, conn);
+    let wires;
+    if (dragging) {
+      const live = { ...numericBoard(b, this.n), traces: [], vias: [], pours: [] };
+      wires = airwires(live, connectivity(live));
+    } else wires = this.wiresKey === key ? this.wires : airwires(nb, conn);
     this.wires = wires;
     this.wiresKey = key;
     const dim = [];
@@ -297,7 +305,7 @@ export class BoardEditor {
     if (hot.length) out.push(`<path d="${hot.join('')}" stroke="${c.air}" stroke-width="2" fill="none" pointer-events="none"/>`);
     // Design-rule problems, once there is copper to check (not while dragging).
     if ((nb.traces || []).length || (nb.vias || []).length) {
-      if (!this.drag && !this.route && this.drcKey !== key) {
+      if (!dragging && !this.route && this.drcKey !== key) {
         this.drcResult = drc(nb);
         this.drcKey = key;
       }

@@ -162,7 +162,8 @@ export function connectivity(b, items = copperItems(b)) {
     const first = new Map(); // region -> item index
     items.forEach((it, i) => {
       if (it.groupNet !== pour.net || !it.layers.includes(pour.layer)) return;
-      for (const reg of grid.touching(it.shape)) {
+      const regions = grid.thermals.has(it.id) ? new Set(grid.thermals.get(it.id).map((sp) => sp.region)) : grid.touching(it.shape);
+      for (const reg of regions) {
         if (first.has(reg)) parent[find(i)] = find(first.get(reg));
         else first.set(reg, i);
       }
@@ -223,6 +224,10 @@ export function pourGrid(b, items, pour) {
   };
   for (const it of others) knock(it.shape, clear);
   for (const h of b.holes || []) knock({ a: [h.x, h.y], b: [h.x, h.y], r: h.d / 2 }, clear);
+  // Thermal reliefs: through-hole pads of the pour's own net sit in a ring of clearance, joined to
+  // the pour by four spokes, so they can still be soldered by hand.
+  const thermalPads = pour.thermal === false ? [] : items.filter((it) => it.kind === 'pad' && it.groupNet === pour.net && it.layers.length === 2 && it.layers.includes(pour.layer) && !it.shape.poly);
+  for (const it of thermalPads) knock(it.shape, clear);
   // Number the connected areas (4-neighbour flood fill); drop slivers too small to matter.
   let region = 0;
   const stack = [];
@@ -246,6 +251,24 @@ export function pourGrid(b, items, pour) {
     sizes.push(size);
   }
   for (let c = 0; c < cells.length; c++) if (cells[c] > 0 && sizes[cells[c]] * step * step < 1) cells[c] = 0;
+  const cellAt = (p) => {
+    const i = Math.round((p[0] - x0) / step);
+    const j = Math.round((p[1] - y0) / step);
+    return i < 0 || j < 0 || i >= nx || j >= ny ? 0 : cells[j * nx + i];
+  };
+  const spokeW = pour.spoke ?? 0.5;
+  const thermals = new Map();
+  for (const it of thermalPads) {
+    const c = it.shape.a;
+    const reach = it.shape.r + clear + step * 1.5;
+    const spokes = [];
+    for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+      const end = [c[0] + dx * reach, c[1] + dy * reach];
+      const reg = cellAt(end);
+      if (reg > 0) spokes.push({ a: c, b: end, w: spokeW, region: reg });
+    }
+    thermals.set(it.id, spokes);
+  }
   const grid = {
     x0,
     y0,
@@ -255,6 +278,9 @@ export function pourGrid(b, items, pour) {
     cells,
     net: pour.net,
     layer: pour.layer,
+    clear,
+    thermals,
+    spokes: () => [...thermals.values()].flat(),
     // The areas a piece of copper overlaps.
     touching(shape) {
       const out = new Set();
