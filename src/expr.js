@@ -36,7 +36,8 @@ export function evalExpr(src, scope = {}) {
     return src;
   }
   if (typeof src !== 'string' || !src.trim()) throw new Error('Value is empty');
-  const toks = tokenize(src.replace(/mm\b/g, ''));
+  // "150%" means 1.5 (for scales).
+  const toks = tokenize(src.replace(/mm\b/g, '').replace(/(\d*\.?\d+)\s*%/g, '($1/100)'));
   let i = 0;
   const peek = () => toks[i];
   const take = (v) => {

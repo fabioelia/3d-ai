@@ -254,8 +254,11 @@ export const FEATURES = {
   move: {
     label: 'Move',
     fields: [
+      { key: 'bodies', label: 'Bodies', type: 'bodies' },
       { key: 'by', label: 'Move by', type: 'vec3', def: [0, 0, 0] },
       { key: 'rot', label: 'Rotate', type: 'vec3', def: [0, 0, 0], unit: '°', hint: 'degrees about x, y, z, around the body centre' },
+      { key: 'flat', label: 'Lay flat on', type: 'faces', single: true, optional: true, hint: 'a face that should rest on the bed' },
+      { key: 'drop', label: 'Rest it on the bed (Z = 0)', type: 'bool', def: false },
       { key: 'copy', label: 'Keep the original (copy)', type: 'bool', def: false },
     ],
   },

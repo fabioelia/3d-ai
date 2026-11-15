@@ -11,6 +11,7 @@ import { zip } from './export.js';
 import { eagleScript } from './board/script.js';
 import { GRIDS } from './board/editor.js';
 import { saveFile, safeName } from './export.js';
+import { printCheck } from './printcheck.js';
 
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
@@ -73,6 +74,8 @@ export const ICON = {
   off: svg('<rect x="9" y="9" width="11" height="11" rx="1"/><path d="M4 4l6 6M4 9V4h5"/>'),
   route: svg('<path d="M4 18h5l6-12h5"/><circle cx="4" cy="18" r="1.800"/><circle cx="20" cy="6" r="1.800"/>'),
   arrange: svg('<rect x="3.500" y="3.500" width="8" height="6"/><rect x="13.500" y="3.500" width="7" height="6"/><rect x="3.500" y="12.500" width="5" height="8"/><rect x="10.500" y="12.500" width="10" height="8"/>'),
+  measure: svg('<path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/>'),
+  check: svg('<path d="M4 20h16"/><path d="M7 20V9l5-5 5 5v11"/><path d="M9.5 13l2 2 3.5-4"/>'),
   download: svg('<path d="M12 4v11M7.500 10.500L12 15l4.500-4.500M5 20h14"/>'),
 };
 
@@ -82,6 +85,7 @@ const TOOLBAR = [
     ['import', 'Import', 'Bring in a 3D file (STL, STEP, OBJ, 3MF) or a circuit (Eagle, Fusion Electronics or KiCad); you can also drop files onto the view'],
     ['board', 'Board', 'Lay out and route a circuit board, and see it in 3D'],
   ],
+  [['text', 'Text', 'Raised or engraved lettering: pick a plane or a flat face, then click where the text starts']],
   [
     ['box', 'Box', 'Add a box'],
     ['cylinder', 'Cylinder', 'Add a cylinder'],
@@ -101,7 +105,11 @@ const TOOLBAR = [
   [
     ['pattern', 'Pattern', 'Repeat a feature in rows or around an axis'],
     ['mirror', 'Mirror', 'Mirror across a plane'],
-    ['move', 'Move', 'Move, rotate or copy bodies'],
+    ['move', 'Move', 'Move, rotate, copy or lay flat a body'],
+  ],
+  [
+    ['measure', 'Measure', 'Distance and angle between two faces or edges (M)'],
+    ['check', 'Print check', 'Overhangs, floating parts, bed contact and printer size'],
   ],
 ];
 
@@ -121,6 +129,14 @@ let inspectorSig = '';
 let inspectorShowing = '';
 let paramFilter = '';
 let selfEdit = false;
+let fileActs = {};
+let printOpen = false;
+let printVolume = '';
+try {
+  printVolume = localStorage.getItem('caliper.printer') || '';
+} catch {
+  /* per-viewer convenience */
+}
 let toastTimer = null;
 
 export function toast(msg, kind = 'info') {
@@ -164,7 +180,26 @@ function exprInput({ get, set, unit, def, id, label }) {
     selfEdit = false;
     refresh();
   };
-  input.addEventListener('input', commit);
+  // While typing, only values that work are applied: half a parameter name ("wid" on the way to
+  // "width") waits, so the model never breaks mid-word. Leaving the field applies whatever is there.
+  const works = (raw) => {
+    try {
+      evalExpr(isPlain(raw) ? Number(raw) : raw, scope());
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  input.addEventListener('input', () => {
+    const raw = input.value.trim();
+    if (raw !== '' && works(raw)) commit();
+    else refresh();
+  });
+  input.addEventListener('change', () => {
+    const raw = input.value.trim();
+    const cur = get();
+    if (String(cur ?? '') !== (raw === '' ? '' : String(isPlain(raw) ? Number(raw) : raw))) commit();
+  });
   input.addEventListener('keydown', (e) => {
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && isPlain(input.value)) {
       e.preventDefault();
@@ -210,13 +245,16 @@ function renderToolbar() {
 // ---------- parameters ----------
 function renderParams() {
   const box = $('params');
+  const focused = box.contains(document.activeElement) ? document.activeElement : null;
+  const keep = focused?.id ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd } : null;
   refreshersFor('params', []);
   const list = [];
   const rows = store.doc.params.map((p, i) => {
     const name = h('input', { type: 'text', class: 'in p-name', id: `param-name-${i}`, 'aria-label': 'Parameter name', spellcheck: 'false', value: p.name });
     name.addEventListener('change', () => {
       const next = name.value.trim().replace(/[^A-Za-z0-9_]/g, '_');
-      update((doc) => renameParam(doc, i, next));
+      // After Tab has moved the focus on, so the redraw can put it back where it went.
+      setTimeout(() => update((doc) => renameParam(doc, i, next)));
     });
     const value = h('input', { type: 'text', class: 'in p-value', id: `param-value-${i}`, 'aria-label': `${p.name} value`, spellcheck: 'false', autocomplete: 'off', value: p.value });
     const note = h('span', { class: 'p-note' });
@@ -310,6 +348,17 @@ function renderParams() {
       'Add parameter',
     ),
   );
+  if (keep) {
+    const el = $(keep.id);
+    if (el && el !== document.activeElement) {
+      el.focus();
+      try {
+        el.setSelectionRange(keep.start, keep.end);
+      } catch {
+        /* not a text field */
+      }
+    }
+  }
 }
 
 // Renaming a parameter also rewrites the expressions that use it.
@@ -385,6 +434,200 @@ function renderTimeline() {
   ol.replaceChildren(...(items.length ? items : [h('li', { class: 'tl-empty' }, 'Nothing here yet. Start with Sketch or a Box, or ask the assistant for a first draft.')]));
 }
 
+// ---------- bodies ----------
+const printableBodies = () => act.bodyRows().filter((b) => !b.kind);
+
+function renderBodies() {
+  const ol = $('bodies');
+  if (!ol) return;
+  const rows = act.bodyRows();
+  $('bodies-title').textContent = rows.length ? `Bodies (${rows.length})` : 'Bodies';
+  const showAll = $('bodies-showall');
+  showAll.hidden = !rows.some((b) => act.isHidden(b.id));
+  showAll.onclick = () => act.showAllBodies();
+  const items = rows.map((b) => {
+    const hidden = act.isHidden(b.id);
+    return h(
+      'li',
+      {
+        class: `tl-item body-row${store.sel.body === b.id ? ' selected' : ''}${hidden ? ' suppressed' : ''}`,
+        'data-body': b.id,
+        tabindex: '0',
+        title: 'Click to select; double-click to rename',
+        onclick: () => act.selectBody(b.id),
+        ondblclick: () => {
+          act.selectBody(b.id);
+          requestAnimationFrame(() => $('body-name')?.select());
+        },
+        onmouseenter: () => emit('body-hover', b.id),
+        onmouseleave: () => emit('body-hover', null),
+        onkeydown: (e) => e.key === 'Enter' && act.selectBody(b.id),
+      },
+      h('span', { class: 'tl-ico', html: b.kind === 'board' ? ICON.board : ICON.box }),
+      h('span', { class: 'tl-name' }, b.name),
+      h('button', {
+        class: 'icon-btn tl-eye',
+        type: 'button',
+        title: hidden ? 'Show this body' : 'Hide this body (view only; it stays in the model)',
+        'aria-label': hidden ? `Show ${b.name}` : `Hide ${b.name}`,
+        html: hidden ? ICON.eyeOff : ICON.eye,
+        onclick: (e) => {
+          e.stopPropagation();
+          act.toggleBodyHidden(b.id);
+        },
+      }),
+    );
+  });
+  ol.replaceChildren(...(items.length ? items : [h('li', { class: 'tl-empty' }, 'Solids show up here once you make them.')]));
+}
+
+function bodyInspector(box, b) {
+  const hidden = act.isHidden(b.id);
+  const maker = featureById(b.id) || featureById(String(b.id).split('_')[0]);
+  const name = h('input', { type: 'text', class: 'in insp-name', id: 'body-name', 'aria-label': 'Body name', spellcheck: 'false', value: b.name });
+  name.addEventListener('change', () => act.renameBody(b.id, name.value.trim()));
+  name.addEventListener('keydown', (e) => e.key === 'Enter' && name.blur());
+  const size = b.max.map((v, i) => fmt(v - b.min[i], 1)).join(' × ');
+  const board = b.kind === 'board';
+  const act3 = (label, fn, cls = 'btn small') => h('button', { class: cls, type: 'button', onclick: fn }, label);
+  box.replaceChildren(
+    ...[
+      h('div', { class: 'insp-head' }, h('span', { class: 'insp-ico', html: board ? ICON.board : ICON.box }), name, h('span', { class: 'insp-tag' }, board ? 'Board' : 'Body')),
+      h(
+        'dl',
+        { class: 'facts' },
+        h('dt', {}, 'Size'),
+        h('dd', {}, `${size} mm`),
+        h('dt', {}, 'Volume'),
+        h('dd', {}, `${b.isReference ? '≈ ' : ''}${fmt(b.volume / 1000, 2)} cm³`),
+        h('dt', {}, 'Bottom at'),
+        h('dd', {}, `Z = ${fmt(b.min[2], 2)} mm`),
+        maker ? h('dt', {}, 'Made by') : null,
+        maker ? h('dd', {}, h('button', { class: 'link-btn', type: 'button', onclick: () => select({ feature: maker.id, shape: null, picks: [] }) }, featureLabel(maker))) : null,
+      ),
+      b.min[2] < -0.05 && !board ? h('div', { class: 'insp-warn' }, `This body goes ${fmt(-b.min[2], 2)} mm below the bed. Rest it on the bed before printing.`) : null,
+      board ? null : h('div', { class: 'insp-sub' }, 'Position'),
+      board
+        ? h('div', { class: 'insp-actions' }, act3('Open the board editor', () => act.editBoard(b.id), 'btn small primary'))
+        : h('div', { class: 'insp-actions' }, act3('Move / rotate…', () => act.moveBody(b.id)), act3('Rest on the bed', () => act.dropToBed(b.id)), act3('Lay flat on a face…', () => act.layFlat(b.id))),
+      h('div', { class: 'insp-sub' }, 'Export this body'),
+      h('div', { class: 'insp-actions' }, board ? null : act3('STL', () => fileActs.body?.('stl', b.id)), board ? null : act3('3MF', () => fileActs.body?.('3mf', b.id)), b.isMesh ? null : act3('STEP', () => fileActs.body?.('step', b.id))),
+      h(
+        'div',
+        { class: 'insp-actions foot' },
+        act3(hidden ? 'Show' : 'Hide', () => act.toggleBodyHidden(b.id)),
+        act3('Show only this', () => act.isolateBody(b.id)),
+        act.bodyRows().some((x) => act.isHidden(x.id)) ? act3('Show all', () => act.showAllBodies()) : null,
+      ),
+      h('p', { class: 'insp-note' }, 'Hiding only changes the view and exports; the body stays in the model. Double-click a face in the view to select its body.'),
+    ].filter(Boolean),
+  );
+}
+
+// ---------- print check ----------
+const PRINTERS = [
+  ['', 'Any printer'],
+  ['256x256x256', '256 × 256 × 256 mm'],
+  ['250x210x220', '250 × 210 × 220 mm'],
+  ['220x220x250', '220 × 220 × 250 mm'],
+  ['180x180x180', '180 × 180 × 180 mm'],
+];
+let printWarn = [];
+function printInspector(box) {
+  const shown = (store.results?.bodies || []).filter((b) => !act.isHidden(b.id) && !(b.board && act.isHidden(b.board)));
+  const vol = printVolume ? printVolume.split('x').map(Number) : undefined;
+  const rep = printCheck(shown, { build_volume: vol });
+  printWarn = (rep.bodies || []).flatMap((b) => (b.overhang_faces || []).map((o) => ({ kind: 'face', b: b.body, i: Number(o.ref.split(':F')[1]) })));
+  act.app.viewport.setHighlights({ warn: printWarn });
+  const printer = selectInput({
+    id: 'print-volume',
+    label: 'Printer size',
+    options: PRINTERS,
+    get: () => printVolume,
+    set: (v) => {
+      printVolume = v;
+      try {
+        localStorage.setItem('caliper.printer', v);
+      } catch {
+        /* per-viewer convenience */
+      }
+      renderInspector(true);
+    },
+  });
+  const issues = rep.issues || [];
+  box.replaceChildren(...[
+    h('div', { class: 'insp-head' }, h('span', { class: 'insp-ico', html: ICON.check }), h('h2', {}, 'Print check'), h('button', { class: 'icon-btn', type: 'button', title: 'Close the print check', 'aria-label': 'Close the print check', html: ICON.close, style: 'margin-left:auto', onclick: () => closePrint() })),
+    row('Printer size', printer),
+    rep.note
+      ? h('p', { class: 'insp-note' }, rep.note)
+      : h(
+          'ul',
+          { class: 'board-issues' },
+          issues.length ? issues.map((t) => h('li', { class: /overhang|floats|below/.test(t) ? 'bi-overlap' : 'bi-edge' }, t)) : [h('li', { class: 'bi-ok' }, 'Looks printable: everything sits on the bed, no steep overhangs, and it fits.')],
+        ),
+    rep.bodies?.length
+      ? h(
+          'table',
+          { class: 'bodies' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'Body'), h('th', {}, 'On the bed'), h('th', {}, 'Overhang'), h('th', {}, ''))),
+          h(
+            'tbody',
+            {},
+            rep.bodies.map((b) =>
+              h(
+                'tr',
+                {},
+                h('td', {}, b.name),
+                h('td', { class: 'num' }, `${fmt(b.bed_contact_mm2, 0)} mm²`),
+                h('td', { class: 'num' }, `${fmt(b.overhang_mm2, 0)} mm²`),
+                h('td', {}, b.overhang_mm2 > 1 || b.bed_contact_mm2 < 1 ? h('button', { class: 'link-btn', type: 'button', title: 'Turn the body so a flat face rests on the bed', onclick: () => act.layFlat(b.body) }, 'Lay flat…') : null),
+              ),
+            ),
+          ),
+        )
+      : null,
+    printWarn.length ? h('p', { class: 'insp-note' }, 'Overhangs steeper than 45° are marked red in the view. Support them, chamfer them, or turn the part.') : null,
+    h('p', { class: 'insp-note' }, `${rep.not_checked || ''} Hidden bodies are not checked.`),
+  ].filter(Boolean));
+  markTools();
+}
+function closePrint() {
+  printOpen = false;
+  requestAnimationFrame(markTools);
+  printWarn = [];
+  act.app.viewport.setHighlights({ warn: [] });
+  renderInspector(true);
+}
+
+// ---------- measuring ----------
+let measureKey = '';
+let measureText = '';
+const refOfPick = (p) => `${p.b}:${p.kind === 'face' ? 'F' : 'E'}${p.i}`;
+function measureNote(a, b) {
+  const key = `${refOfPick(a)}|${refOfPick(b)}|${store.revision}`;
+  if (key === measureKey) return measureText;
+  measureKey = key;
+  measureText = 'Measuring…';
+  act.app.kernel
+    .measure(refOfPick(a), refOfPick(b))
+    .then((r) => {
+      if (measureKey !== key) return;
+      const bits = [];
+      if (r.gap_between_planes !== undefined) bits.push(`${fmt(r.gap_between_planes, 3)} mm apart (parallel)`);
+      else if (r.min_distance !== undefined) bits.push(r.min_distance < 1e-6 ? 'Touching' : `Distance ${fmt(r.min_distance, 3)} mm`);
+      if (r.angle_deg !== undefined && r.gap_between_planes === undefined) bits.push(`angle ${fmt(r.angle_deg, 2)}°`);
+      if (r.angle_to_plane_deg !== undefined) bits.push(`${fmt(r.angle_to_plane_deg, 2)}° to the face`);
+      measureText = bits.join(' · ') || 'No distance between these two.';
+      renderModebar();
+    })
+    .catch((e) => {
+      if (measureKey !== key) return;
+      measureText = e.message || 'Could not measure these.';
+      renderModebar();
+    });
+  return measureText;
+}
+
 // ---------- inspector ----------
 function presetOf(value, presets) {
   if (value && typeof value === 'object' && !Array.isArray(value) && Array.isArray(value.pick) && Object.keys(value).length === 1) return 'pick';
@@ -396,7 +639,7 @@ function presetOf(value, presets) {
 function selectorField(f, fd, setKey) {
   const kind = fd.type === 'edges' ? 'edge' : 'face';
   const presets = fd.single ? [FACE_PRESETS[0]] : kind === 'edge' ? EDGE_PRESETS : FACE_PRESETS;
-  const cur = presetOf(f[fd.key], presets);
+  const cur = fd.optional && (f[fd.key] === undefined || f[fd.key] === null) ? 'pick' : presetOf(f[fd.key], presets);
   const opts = presets.map((p) => [p[0], p[1]]);
   if (cur === 'custom') opts.push(['custom', 'Custom (set by the assistant)']);
   const sel = selectInput({
@@ -412,14 +655,15 @@ function selectorField(f, fd, setKey) {
   });
   const parts = [fd.single ? null : sel];
   if (cur === 'pick') {
-    const n = f[fd.key].pick.length;
+    const n = f[fd.key]?.pick?.length || 0;
     const picking = store.mode.kind === 'pick' && store.mode.feature === f.id && store.mode.key === fd.key;
     parts.push(
       h(
         'div',
         { class: 'pick-line' },
         h('span', { class: `pick-count${n ? '' : ' none'}` }, n ? `${n} ${kind}${n === 1 ? '' : 's'} picked` : `No ${kind}s picked yet`),
-        h('button', { class: picking ? 'btn primary small' : 'btn small', type: 'button', onclick: () => (picking ? act.leaveMode() : act.startPick(f.id, fd.key, kind)) }, picking ? 'Done' : n ? 'Change' : `Pick ${kind}s`),
+        h('button', { class: picking ? 'btn primary small' : 'btn small', type: 'button', onclick: () => (picking ? act.leaveMode() : act.startPick(f.id, fd.key, kind)) }, picking ? 'Done' : n ? 'Change' : fd.single ? `Pick a ${kind}` : `Pick ${kind}s`),
+        fd.optional && n && !picking ? h('button', { class: 'btn small', type: 'button', onclick: () => setKey(undefined) }, 'Clear') : null,
       ),
     );
   } else if (cur === 'custom') parts.push(h('code', { class: 'custom-sel' }, JSON.stringify(f[fd.key])));
@@ -473,6 +717,8 @@ function fieldControl(obj, fd, setKey, idp) {
     }
     case 'vec3':
       return vec3Field(obj, fd, setKey, idp);
+    case 'bodies':
+      return bodiesField(obj, fd, setKey);
     case 'edges':
     case 'faces':
       return selectorField(obj, fd, setKey);
@@ -500,6 +746,27 @@ function fieldControl(obj, fd, setKey, idp) {
     default:
       return h('span', {}, '');
   }
+}
+
+// Which bodies a feature acts on: a checklist of the model's bodies; none ticked means all of them.
+function bodiesField(obj, fd, setKey) {
+  const list = printableBodies().filter((b) => !b.id.startsWith(`${obj.id}_`));
+  const cur = [].concat(obj[fd.key] || []);
+  if (!list.length) return h('span', { class: 'insp-note' }, 'No bodies yet.');
+  const toggle = (id, on) => {
+    const next = on ? [...cur.filter((x) => x !== id), id] : cur.filter((x) => x !== id);
+    setKey(next.length && next.length < list.length ? next : undefined);
+  };
+  return h(
+    'div',
+    { class: 'body-checks' },
+    list.map((b) => {
+      const el = h('input', { type: 'checkbox', onchange: () => toggle(b.id, el.checked) });
+      el.checked = !cur.length || cur.includes(b.id) || cur.includes(b.name);
+      return h('label', { class: 'body-check', onmouseenter: () => emit('body-hover', b.id), onmouseleave: () => emit('body-hover', null) }, el, h('span', {}, b.name));
+    }),
+    h('div', { class: 'row-hint' }, cur.length ? `${cur.length} of ${list.length}` : `All ${list.length} bodies`),
+  );
 }
 
 function fieldRows(obj, fields, setter, idp) {
@@ -964,10 +1231,32 @@ function inspectorSignature() {
   const sizes = f ? '' : (store.results?.bodies || []).map((b) => `${b.name}:${b.min.concat(b.max).map((v) => v.toFixed(2)).join(',')}:${Math.round(b.volume)}`).join(';');
   // Boards: which part or hole is selected and the shape of what it has, not the values being typed.
   const brd = f?.type === 'board' ? JSON.stringify([f.outline?.kind, f.pours, (f.holes || []).length, (f.parts || []).map((p) => `${p.ref}${p.off ? '-' : ''}${p.side === 'bottom' ? 'b' : ''}${p.shape}`).join(), mode.kind === 'board' && mode.id === f.id, sel.shape && (f.parts || []).find((p) => p.ref === sel.shape) ? Object.keys((f.parts || []).find((p) => p.ref === sel.shape)).sort().join() : '']) : '';
-  return [brd, sizes, store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
+  const bsig = sel.body ? JSON.stringify([sel.body, act.isHidden(sel.body), (store.results?.bodies || []).find((b) => b.id === sel.body)?.name, act.bodyRows().some((x) => act.isHidden(x.id))]) : '';
+  const psig = printOpen && !f && !sel.body ? `print:${printVolume}:${store.revision}:${JSON.stringify(store.doc.hidden || [])}` : '';
+  return [bsig, psig, act.autoExtrude(sel.feature) ? 'auto' : '', brd, sizes, store.results?.features?.[sel.feature]?.note, store.results?.features?.[sel.feature]?.error, mode.kind, mode.feature, mode.key, sel.feature, sel.shape, shapeOf(f), sels, shapeOf(shape), sk ? sk.shapes.length : '', store.doc.features.length, sel.picks.length, store.results?.bodies.length].join('|');
 }
 
+// Redraws keep the field being typed in focused (same id), with its caret where it was.
 function renderInspector(force = false) {
+  const box = $('inspector');
+  const el = box.contains(document.activeElement) ? document.activeElement : null;
+  const keep = el?.id && el.tagName === 'INPUT' ? { id: el.id, start: el.selectionStart, end: el.selectionEnd, value: el.value } : null;
+  drawInspector(force);
+  if (keep && !box.contains(document.activeElement)) {
+    const again = $(keep.id);
+    if (again && again.tagName === 'INPUT') {
+      if (again.value !== keep.value && again.type === 'text') again.value = keep.value;
+      again.focus();
+      try {
+        again.setSelectionRange(keep.start, keep.end);
+      } catch {
+        /* not a text field */
+      }
+    }
+  }
+}
+
+function drawInspector(force = false) {
   const sig = inspectorSignature();
   if (!force && sig === inspectorSig) return;
   inspectorSig = sig;
@@ -1011,7 +1300,16 @@ function renderInspector(force = false) {
     }
   }
 
+  if (mode.kind === 'model' && sel.body) {
+    const b = (store.results?.bodies || []).find((x) => x.id === sel.body);
+    if (b) return bodyInspector(box, b);
+  }
   const f = featureById(sel.feature);
+  if (!f && printOpen && mode.kind === 'model') return printInspector(box);
+  if (printWarn.length) {
+    printWarn = [];
+    act.app.viewport.setHighlights({ warn: [] });
+  }
   if (f) {
     const def = FEATURES[f.type] || { label: f.type, fields: [] };
     const setter = (key, v) =>
@@ -1043,6 +1341,15 @@ function renderInspector(force = false) {
         : null,
       ...(f.type === 'board' ? boardRows(f, setter) : fieldRows(f, def.fields, setter, 'f')),
       ...(f.type === 'import' || f.type === 'board' ? lineUpRows(f, setter) : []),
+      act.autoExtrude(f.id)
+        ? h(
+            'div',
+            { class: 'insp-instead' },
+            h('span', {}, 'Made automatically from the sketch.'),
+            h('button', { class: 'btn small', type: 'button', onclick: () => act.replaceAutoExtrude(f.id, 'revolve') }, 'Revolve instead'),
+            (f.op || 'join') !== 'cut' ? h('button', { class: 'btn small', type: 'button', onclick: () => act.replaceAutoExtrude(f.id, 'cut') }, 'Cut instead') : null,
+          )
+        : null,
     ];
     if (f.type === 'sketch') {
       const editing = mode.kind === 'sketch' && mode.id === f.id;
@@ -1079,16 +1386,28 @@ function renderInspector(force = false) {
           h(
             'tbody',
             {},
-            bodies.map((b) => h('tr', {}, h('td', {}, b.name), h('td', { class: 'num' }, b.max.map((v, i) => fmt(v - b.min[i], 1)).join(' × ')), h('td', { class: 'num', title: b.isReference ? 'Approximate: this reference mesh is not a closed solid' : null }, `${b.isReference ? '≈ ' : ''}${fmt(b.volume / 1000, 2)} cm³`))),
+            bodies.map((b) => h('tr', { class: 'click-row', title: 'Select this body', onclick: () => act.selectBody(b.id), onmouseenter: () => emit('body-hover', b.id), onmouseleave: () => emit('body-hover', null) }, h('td', {}, b.name), h('td', { class: 'num' }, b.max.map((v, i) => fmt(v - b.min[i], 1)).join(' × ')), h('td', { class: 'num', title: b.isReference ? 'Approximate: this reference mesh is not a closed solid' : null }, `${b.isReference ? '≈ ' : ''}${fmt(b.volume / 1000, 2)} cm³`))),
           ),
         )
       : h('p', { class: 'insp-note' }, 'No solids yet.'),
-    h('p', { class: 'insp-note' }, 'Click a feature in the timeline to edit it. Click a face or edge in the view to select it, then pick a tool.'),
+    bodies.length ? h('div', { class: 'insp-actions' }, h('button', { class: 'btn small', type: 'button', onclick: () => act.command('check') }, h('span', { html: ICON.check }), 'Print check'), h('button', { class: 'btn small', type: 'button', onclick: () => act.command('measure') }, h('span', { html: ICON.measure }), 'Measure')) : '',
+    h('p', { class: 'insp-note' }, 'Click a feature in the timeline to edit it, or a body to move, hide or export it. Click a face or edge in the view to select it, then pick a tool.'),
   );
 }
 
 // ---------- mode bar, hints, readout ----------
+// Tools that are on show as pressed: Sketch while sketching, Measure while measuring, Print check while open.
+function markTools() {
+  const on = { sketch: store.mode.kind === 'sketch' || store.mode.kind === 'plane', measure: act.tools.measuring, check: printOpen, board: store.mode.kind === 'board' };
+  for (const b of document.querySelectorAll('#toolbar .tool')) {
+    const active = !!on[b.dataset.cmd];
+    b.classList.toggle('active', active);
+    if (b.dataset.cmd in on) b.setAttribute('aria-pressed', String(active));
+  }
+}
+
 function renderModebar() {
+  markTools();
   const bar = $('modebar');
   const { mode, sel } = store;
   let kids = null;
@@ -1166,6 +1485,13 @@ function renderModebar() {
       h('span', { class: 'mb-note' }, `Click ${noun} for ${featureLabel(f || {})}. ${n} picked.`),
       h('button', { class: 'btn primary', type: 'button', id: 'pick-done', onclick: () => act.leaveMode() }, 'Done'),
     ];
+  } else if (act.tools.measuring && mode.kind === 'model') {
+    const n = sel.picks.length;
+    kids = [
+      h('span', { class: 'mb-title' }, h('span', { class: 'mb-ico', html: ICON.measure }), 'Measure'),
+      h('span', { class: 'mb-measure', role: 'status' }, n === 2 ? measureNote(sel.picks[0], sel.picks[1]) : n === 1 ? `${describePick(sel.picks[0])}. Now click a second face or edge.` : 'Click two faces or edges.'),
+      h('button', { class: 'btn primary small', type: 'button', onclick: () => act.setMeasuring(false) }, 'Done'),
+    ];
   } else if (sel.picks.length) {
     const faces = sel.picks.filter((p) => p.kind === 'face');
     const edges = sel.picks.filter((p) => p.kind === 'edge');
@@ -1173,8 +1499,8 @@ function renderModebar() {
     const btn = (label, cmd) => h('button', { class: 'btn small', type: 'button', onclick: () => act.command(cmd) }, label);
     kids = [
       h('span', { class: 'mb-title' }, edges.length ? `${edges.length} edge${edges.length === 1 ? '' : 's'} selected` : `${faces.length} face${faces.length === 1 ? '' : 's'} selected`),
-      h('div', { class: 'mb-tools' }, edges.length ? [btn('Fillet', 'fillet'), btn('Chamfer', 'chamfer')] : [planar ? btn('Sketch here', 'sketch') : null, planar ? btn('Push / pull', 'extrude') : null, btn('Shell', 'shell')]),
-      h('span', { class: 'mb-note' }, describePick(sel.picks[sel.picks.length - 1])),
+      h('div', { class: 'mb-tools' }, edges.length ? [btn('Fillet', 'fillet'), btn('Chamfer', 'chamfer')] : [planar ? btn('Sketch here', 'sketch') : null, planar ? btn('Push / pull', 'extrude') : null, btn('Shell', 'shell'), planar && faces.length === 1 ? h('button', { class: 'btn small', type: 'button', title: 'Turn the body so this face rests on the bed', onclick: () => act.layFlat() }, 'Lay flat') : null]),
+      sel.picks.length === 2 ? h('span', { class: 'mb-measure', role: 'status' }, measureNote(sel.picks[0], sel.picks[1])) : h('span', { class: 'mb-note' }, describePick(sel.picks[sel.picks.length - 1])),
       h('button', { class: 'icon-btn', type: 'button', title: 'Clear selection', 'aria-label': 'Clear selection', html: ICON.close, onclick: () => select({ picks: [] }) }),
     ];
   }
@@ -1192,7 +1518,9 @@ function renderModebar() {
         ? 'Click to add or remove. Later features are hidden while you pick.'
         : mode.kind === 'plane'
           ? 'Pick a plane or a flat face.'
-          : 'Drag to orbit, right-drag to pan, scroll to zoom. Click a face or edge to select it.';
+          : act.tools.measuring
+            ? 'Click two faces or edges to measure between them. Esc stops.'
+            : 'Drag to orbit, right-drag to pan, scroll to zoom. Click a face or edge to select it; Shift-click a second one to measure; double-click selects the body.';
 }
 
 function describePick(p) {
@@ -1243,6 +1571,19 @@ function renderTop() {
 }
 
 // ---------- menus ----------
+// The export menu's "What to export": all shown bodies, or one body (the selected one first).
+function fillExportChoice() {
+  const sel = $('export-what');
+  if (!sel) return;
+  const rows = act.bodyRows();
+  const picked = store.sel.body || store.sel.picks[0]?.b || null;
+  const hiddenN = rows.filter((b) => act.isHidden(b.id)).length;
+  const opts = [['visible', hiddenN ? `All shown bodies (${rows.length - hiddenN} of ${rows.length})` : rows.length > 1 ? `All bodies (${rows.length})` : 'The whole part']];
+  for (const b of rows) opts.push([b.id, `${b.name}${b.kind === 'board' ? ' (board, STEP only)' : ''}`]);
+  sel.replaceChildren(...opts.map(([v, t]) => h('option', { value: v }, t)));
+  sel.value = picked && rows.some((b) => b.id === picked) ? picked : 'visible';
+}
+
 function bindMenus(fileActions) {
   const menus = [
     ['file-btn', 'file-menu'],
@@ -1253,6 +1594,7 @@ function bindMenus(fileActions) {
     $(b).addEventListener('click', (e) => {
       e.stopPropagation();
       const open = $(m).hidden;
+      if (open && m === 'export-menu') fillExportChoice();
       closeAll();
       $(m).hidden = !open;
       $(b).setAttribute('aria-expanded', String(open));
@@ -1270,6 +1612,7 @@ function bindMenus(fileActions) {
 }
 
 export function initUI(fileActions) {
+  fileActs = fileActions;
   renderToolbar();
   // Rows are rebuilt under the mouse; leaving the list always ends a hover preview.
   $('timeline').addEventListener('mouseleave', () => emit('ghost-hover', null));
@@ -1293,6 +1636,7 @@ export function initUI(fileActions) {
     renderTop();
     renderParams();
     renderTimeline();
+    renderBodies();
     renderInspector(force);
     renderModebar();
   };
@@ -1300,15 +1644,24 @@ export function initUI(fileActions) {
     renderTop();
     if (!selfEdit) renderParams();
     renderTimeline();
+    renderBodies();
     renderInspector(!selfEdit);
     renderModebar();
   });
   on('select', () => {
+    if (store.sel.feature || store.sel.body) printOpen = false;
     renderTimeline();
+    renderBodies();
     renderInspector(true);
     renderModebar();
-    if (store.sel.feature && document.body.dataset.tab === 'model' && store.mode.kind !== 'sketch') showTab('inspect');
+    if ((store.sel.feature || store.sel.body) && document.body.dataset.tab === 'model' && store.mode.kind !== 'sketch') showTab('inspect');
   });
+  on('print-check', () => {
+    printOpen = true;
+    renderInspector(true);
+    if (document.body.dataset.tab === 'model') showTab('inspect');
+  });
+  $('bodies')?.addEventListener('mouseleave', () => emit('body-hover', null));
   on('mode', () => {
     renderTimeline();
     renderInspector(true);
@@ -1316,6 +1669,7 @@ export function initUI(fileActions) {
   });
   on('results', () => {
     renderTimeline();
+    renderBodies();
     renderInspector();
     renderReadout();
     for (const fn of refreshers) fn();
@@ -1326,13 +1680,14 @@ export function initUI(fileActions) {
     const shown = document.querySelector('#inspector .insp-error span:last-child')?.textContent;
     if ((err || '') !== (shown || '') && document.activeElement?.closest?.('#inspector') == null) renderInspector(true);
     else if ((err || '') !== (shown || '')) patchError(err);
-    if (store.mode.kind === 'model' && store.sel.picks.length) renderModebar();
+    if (store.mode.kind === 'model' && (store.sel.picks.length || act.tools.measuring)) renderModebar();
   });
   on('kernel', renderKernel);
   on('focus-first', () => {
     requestAnimationFrame(() => {
       const el = document.querySelector('#inspector .row .in:not(select)');
-      if (el && window.matchMedia('(min-width: 821px)').matches) {
+      // Not on touch screens: focusing a field there pops up the keyboard over the model.
+      if (el && window.matchMedia('(min-width: 821px)').matches && !window.matchMedia('(pointer: coarse)').matches) {
         el.focus();
         el.select?.();
       }

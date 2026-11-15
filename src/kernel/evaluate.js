@@ -793,7 +793,12 @@ export function createKernel(r) {
         frame = offsetFrame(frame, n(f.offset ?? 0));
         rec.frame = frame;
         rec.sketch = { frame, shapes: f.shapes || [] };
-        for (const s of f.shapes || []) shapeDrawing(s, n); // validate dimensions early
+        try {
+          for (const s of f.shapes || []) shapeDrawing(s, n); // validate dimensions early
+        } catch (e) {
+          if (e && typeof e === 'object') e.rec = rec; // keep the plane so the sketch stays open while it is fixed
+          throw e;
+        }
         return { state, rec };
       }
 
@@ -839,6 +844,13 @@ export function createKernel(r) {
           vec = v3.mul(frame.dir, dist);
         } else vec = v3.mul(frame.dir, dist);
         if (f.face !== undefined && (through || f.side === 'both')) fail('Push/pull uses a plain distance.');
+        // Cutting from a face (push/pull, or a sketch drawn on a face) always goes into the body:
+        // outward there is only air, so a positive distance means "this deep".
+        const onFace = f.face !== undefined || (hint !== undefined && ctx.sketches[f.sketch]?.body !== undefined);
+        if (onFace && (f.op || 'join') === 'cut' && !through && f.side !== 'both' && dist > 0) {
+          dist = -dist;
+          vec = v3.mul(frame.dir, dist);
+        }
         tool = make(vec, origin);
         rec.tool = { shape: tool, f, hint: hint !== undefined ? state.bodies[hint]?.id : undefined };
         return { state: applyOp(state, tool, through && !f.op ? { ...f, op: 'cut' } : f, hint), rec };
@@ -1082,9 +1094,21 @@ export function createKernel(r) {
 
       case 'move': {
         if (!state.bodies.length) fail('There is nothing to move yet.');
-        const wanted = f.bodies ? [].concat(f.bodies) : null;
+        let wanted = f.bodies && [].concat(f.bodies).length ? [].concat(f.bodies) : null;
         const by = (f.by || [0, 0, 0]).map(n);
         const rot = (f.rot || [0, 0, 0]).map(n);
+        // "Lay flat": turn the body so this face points straight down, then rest it on the bed.
+        let flat = null;
+        if (f.flat !== undefined && f.flat !== null && !(f.flat.pick && !f.flat.pick.length)) {
+          const sel = select(state, f.flat, 'face', n);
+          const [bi, set] = [...sel.entries()][0] || [];
+          if (bi === undefined) fail('Pick the flat face that should rest on the bed.');
+          const d = topo(state.bodies[bi].shape).fd[[...set][0]];
+          if (!d?.n) fail('Lay flat needs a flat face.');
+          flat = { body: state.bodies[bi].id, n: d.n };
+          wanted ||= [flat.body];
+        }
+        const drop = !!f.drop || !!flat;
         const out = [];
         let count = state.count;
         for (const b of state.bodies) {
@@ -1095,9 +1119,19 @@ export function createKernel(r) {
           const t = topo(b.shape);
           const about = Array.isArray(f.about) ? f.about.map(n) : v3.mul(v3.add(t.min, t.max), 0.5);
           let s = b.shape.clone();
+          if (flat && flat.body === b.id) {
+            const down = [0, 0, -1];
+            const c = v3.dot(flat.n, down);
+            if (c < 1 - 1e-9) {
+              let axis = v3.cross(flat.n, down);
+              if (v3.len(axis) < 1e-9) axis = [1, 0, 0];
+              s = xf.rotate(s, (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI, about, v3.norm(axis));
+            }
+          }
           if (rot[0]) s = xf.rotate(s, rot[0], about, [1, 0, 0]);
           if (rot[1]) s = xf.rotate(s, rot[1], about, [0, 1, 0]);
           if (rot[2]) s = xf.rotate(s, rot[2], about, [0, 0, 1]);
+          if (drop) s = s.translate([0, 0, -topo(s).min[2]]);
           if (by[0] || by[1] || by[2]) s = s.translate(by);
           if (f.copy) {
             out.push(b, { id: `${f.id}_${b.id}`, name: `Body ${++count}`, shape: s });
@@ -1154,6 +1188,7 @@ export function createKernel(r) {
           const after = JSON.stringify(work);
           if (after !== before) entry.picks = work;
         } catch (e) {
+          if (e && e.rec) entry.rec = e.rec;
           entry.error = e instanceof FeatureError ? e.message : FAIL_HINT[f.type] || `This ${f.type} could not be built. Try different dimensions.`;
           if (!(e instanceof FeatureError) && e && e.message && !(typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.Exception)) entry.detail = String(e.message);
         }
@@ -1172,6 +1207,9 @@ export function createKernel(r) {
       if (entry.rec.note) info[f.id].note = entry.rec.note;
       if (entry.picks) picks[f.id] = entry.picks;
     });
+    // Names the person gave bodies in the Bodies list.
+    const names = doc.bodyNames && typeof doc.bodyNames === 'object' ? doc.bodyNames : null;
+    if (names) state = { ...state, bodies: state.bodies.map((b) => (names[b.id] ? { ...b, name: String(names[b.id]) } : b)) };
     cache = next;
     lastRecs = recs;
     lastBodies = state.bodies;
@@ -1269,8 +1307,18 @@ export function createKernel(r) {
     return list;
   }
 
+  const bodyMesh = (b, quality) => (isRaw(b.shape) ? { vertices: b.shape.positions, triangles: b.shape.indices } : isMesh(b.shape) ? meshTriangles(b.shape) : b.shape.mesh(QUALITY[quality] || QUALITY.standard));
+
+  // One mesh per body, kept apart (for 3MF, where each body is its own object on the plate).
+  function exportMeshes(ids, quality = 'standard') {
+    return pickBodies(ids, { printable: true }).map((b) => {
+      const m = bodyMesh(b, quality);
+      return { name: b.name, vertices: Float32Array.from(m.vertices), triangles: Uint32Array.from(m.triangles) };
+    });
+  }
+
   function exportSTL(ids, quality = 'standard') {
-    const meshes = pickBodies(ids, { printable: true }).map((b) => (isRaw(b.shape) ? { vertices: b.shape.positions, triangles: b.shape.indices } : isMesh(b.shape) ? meshTriangles(b.shape) : b.shape.mesh(QUALITY[quality] || QUALITY.standard)));
+    const meshes = pickBodies(ids, { printable: true }).map((b) => bodyMesh(b, quality));
     const count = meshes.reduce((s, m) => s + m.triangles.length / 3, 0);
     const buf = new ArrayBuffer(84 + count * 50);
     const dv = new DataView(buf);
@@ -1645,5 +1693,5 @@ export function createKernel(r) {
     return { positions: new Float32Array(out.positions), indices: new Uint32Array(out.indices), lines: new Float32Array(out.lines), cut: rec.tool?.f?.op === 'cut' };
   }
 
-  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference, fitBoard, surfaceBelow, ghost };
+  return { evaluate, exportSTL, exportSTEP, exportMeshes, addFile, query, measure, listElements, interference, fitBoard, surfaceBelow, ghost };
 }

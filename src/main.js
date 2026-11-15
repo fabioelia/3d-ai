@@ -62,6 +62,7 @@ const boardEditor = new BoardEditor(document.querySelector('.stage'), {
   toast: (m) => toast(m),
 });
 Object.assign(act.app, { viewport, sketcher, board: boardEditor, kernel, toast, rebuildNow });
+viewport.setHidden(store.doc.hidden);
 
 // ---------- rebuild loop ----------
 let timer = null;
@@ -162,7 +163,7 @@ function syncHighlights() {
     const f = featureById(mode.feature);
     selected = (f?.[mode.key]?.pick || []).map((p) => ({ kind: mode.pick, b: p.b, i: p.i }));
   } else if (mode.kind === 'model') selected = store.sel.picks;
-  viewport.setHighlights({ selected });
+  viewport.setHighlights({ selected, bodies: mode.kind === 'model' && store.sel.body ? [store.sel.body] : [] });
 }
 
 let lastModeKind = 'model';
@@ -186,6 +187,7 @@ on('mode', () => {
   syncHighlights();
 });
 on('doc', () => {
+  viewport.setHidden(store.doc.hidden);
   scheduleRebuild();
   if (sketcher.active) sketcher.redraw();
   if (boardEditor.active) {
@@ -261,6 +263,7 @@ async function syncGhost() {
 on('select', syncGhost);
 on('results', syncGhost);
 on('mode', syncGhost);
+on('body-hover', (id) => viewport.setHighlights({ hoverBody: id || null }));
 on('ghost-hover', (id) => {
   ghostHover = id || null;
   syncGhost();
@@ -313,9 +316,10 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
-    if (store.mode.kind !== 'model') act.leaveMode();
+    if (act.tools.measuring) act.setMeasuring(false);
+    else if (store.mode.kind !== 'model') act.leaveMode();
     else if (store.sel.picks.length) select({ picks: [] });
-    else if (store.sel.feature) select({ feature: null, shape: null });
+    else if (store.sel.feature || store.sel.body) select({ feature: null, shape: null, body: null });
     return;
   }
   if (e.key === 'Enter' && store.mode.kind !== 'model') {
@@ -328,7 +332,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (mod || e.altKey || store.mode.kind !== 'model') return;
-  const keys = { e: 'extrude', f: 'fillet', s: 'sketch' };
+  const keys = { e: 'extrude', f: 'fillet', s: 'sketch', m: 'measure' };
   const cmd = keys[e.key.toLowerCase()];
   if (cmd) {
     e.preventDefault();
@@ -337,20 +341,38 @@ window.addEventListener('keydown', (e) => {
 });
 
 // ---------- file menu ----------
-async function exportFile(kind) {
+async function exportFile(kind, ids = null) {
   if (!store.results?.bodies.length || store.mode.kind !== 'model') {
     if (store.mode.kind !== 'model') act.leaveMode();
     await rebuildNow();
   }
   if (!store.results?.bodies.length) return toast('There is nothing to export yet. Build a solid first.');
-  const base = safeName(store.doc.name);
+  // Which bodies: the export menu's choice (all shown bodies, or one), or ids passed in (a body's own
+  // Export buttons). Hidden bodies stay out of "all"; boards and their parts are never printed.
+  if (!ids) {
+    const what = $('export-what')?.value || 'visible';
+    if (what !== 'visible') ids = [what];
+    else {
+      const rows = act.bodyRows();
+      const shown = rows.filter((b) => !act.isHidden(b.id) && (kind === 'step' || !b.kind));
+      if (!shown.length) return toast(rows.some((b) => act.isHidden(b.id)) ? 'Every body is hidden. Show the ones to export in the Bodies list.' : 'There is nothing printable to export yet.', 'error');
+      ids = shown.length === rows.length && kind !== 'step' ? null : shown.map((b) => b.id);
+    }
+  }
+  const one = ids && ids.length === 1 ? store.results.bodies.find((b) => b.id === ids[0]) : null;
+  const base = safeName(one ? `${store.doc.name} ${one.name}` : store.doc.name);
   try {
     if (kind === 'stl') {
-      const out = await kernel.exportSTL(null, $('stl-quality').value);
+      const out = await kernel.exportSTL(ids, $('stl-quality').value);
       const msg = await saveFile(`${base}.stl`, out.buffer, 'model/stl');
       if (msg) toast(`${msg} · ${out.triangles.toLocaleString()} triangles`);
+    } else if (kind === '3mf') {
+      const meshes = await kernel.exportMeshes(ids, $('stl-quality').value);
+      const { build3MF } = await import('./threemf.js');
+      const msg = await saveFile(`${base}.3mf`, await build3MF(meshes, store.doc.name), 'model/3mf');
+      if (msg) toast(`${msg} · ${meshes.length} object${meshes.length === 1 ? '' : 's'} on the plate`);
     } else {
-      const out = await kernel.exportSTEP(null);
+      const out = await kernel.exportSTEP(ids);
       const msg = await saveFile(`${base}.step`, out.buffer, 'model/step');
       if (msg) toast(out.skipped?.length ? `${msg}. Left out ${out.skipped.join(', ')}: mesh bodies cannot go in a STEP file.` : msg);
     }
@@ -381,7 +403,9 @@ const fileActions = {
     }
   },
   stl: () => exportFile('stl'),
+  '3mf': () => exportFile('3mf'),
   step: () => exportFile('step'),
+  body: (kind, id) => exportFile(kind, [id]),
 };
 
 async function openProject(file) {

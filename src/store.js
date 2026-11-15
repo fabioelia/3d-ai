@@ -47,7 +47,7 @@ export const store = {
   doc: structuredClone(EXAMPLE_DOC),
   results: null, // last kernel output for the displayed state
   kernel: { state: 'loading', progress: 0, message: '' },
-  sel: { feature: null, shape: null, picks: [] }, // picks: [{ kind: 'face'|'edge', b, i }]
+  sel: { feature: null, shape: null, picks: [], body: null }, // picks: [{ kind: 'face'|'edge', b, i }]; body: a body picked in the Bodies list
   mode: { kind: 'model' }, // model | plane | sketch {id, tool} | pick {feature, key, kind}
   undoStack: [],
   redoStack: [],
@@ -87,6 +87,9 @@ function saveSoon() {
 export function normalize(doc) {
   const out = { name: String(doc.name || 'Untitled part'), params: [], features: [] };
   if (doc.example) out.example = true;
+  // View state kept with the part: bodies hidden from view, and names given to bodies.
+  if (Array.isArray(doc.hidden) && doc.hidden.length) out.hidden = doc.hidden.map(String);
+  if (doc.bodyNames && typeof doc.bodyNames === 'object' && !Array.isArray(doc.bodyNames)) out.bodyNames = { ...doc.bodyNames };
   for (const p of doc.params || []) {
     if (p && p.name !== undefined) out.params.push({ name: String(p.name), value: typeof p.value === 'number' ? String(p.value) : String(p.value ?? '0') });
   }
@@ -176,6 +179,8 @@ function describeParts(a, b) {
 export function describeChange(a, b) {
   const out = [];
   if (a.name !== b.name) out.push(`renamed the part to "${b.name}"`);
+  if (JSON.stringify(a.bodyNames || {}) !== JSON.stringify(b.bodyNames || {})) for (const [id, n] of Object.entries(b.bodyNames || {})) if ((a.bodyNames || {})[id] !== n) out.push(`renamed body ${id} to "${n}"`);
+  if (JSON.stringify(a.hidden || []) !== JSON.stringify(b.hidden || [])) out.push((b.hidden || []).length ? `hid ${(b.hidden || []).join(', ')} from view` : 'showed all bodies');
   const pa = new Map((a.params || []).map((p) => [p.name, p.value]));
   const pb = new Map((b.params || []).map((p) => [p.name, p.value]));
   for (const [k, v] of pb) {
@@ -279,6 +284,9 @@ const refList = (picks) => picks.map((p) => `${p.b}:${p.kind === 'face' ? 'F' : 
 export function select(patch, { by = 'user' } = {}) {
   const prev = store.sel;
   store.sel = { ...store.sel, ...patch };
+  // A feature and a body are two different things to show in the inspector: picking one drops the other.
+  if (patch.feature && patch.body === undefined) store.sel.body = null;
+  if (patch.body) store.sel.feature = null;
   if (patch.picks && refList(patch.picks) !== refList(prev.picks || [])) {
     logActivity(by, patch.picks.length ? `selected ${refList(patch.picks)}` : 'cleared the selection', { merge: `${by}:select` });
   }

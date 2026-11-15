@@ -65,6 +65,9 @@ self.onmessage = async ({ data }) => {
     } else if (type === 'stl') {
       result = kernel.exportSTL(data.bodies, data.quality);
       transfer.push(result.buffer);
+    } else if (type === 'meshes') {
+      result = kernel.exportMeshes(data.bodies, data.quality);
+      for (const m of result) transfer.push(m.vertices.buffer, m.triangles.buffer);
     } else if (type === 'step') {
       result = await kernel.exportSTEP(data.bodies);
       transfer.push(result.buffer);

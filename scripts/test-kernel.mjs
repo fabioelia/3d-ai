@@ -112,6 +112,43 @@ d1.params[0].value = '70';
 const r3 = run('same picks after w=70', d1, (r, e) => { expect(!e.length, 'errors'); expect(near(r.max[0], 40), 'pulled to 40'); expect(near(r.volume, 75*30*10 - (1-Math.PI/4)*9*10, 0.001), 'fillet followed the edge'); expect(Object.keys(r.picks).length >= 1, 'picks refreshed'); });
 console.log('  refreshed picks:', JSON.stringify(r3.picks.pp?.face));
 
+// cutting from a face goes into the body whichever sign the distance has
+run('cut on a face sketch with a positive distance goes in', { features: [
+  { id: 'b', type: 'box', w: 40, d: 30, h: 10 },
+  { id: 's', type: 'sketch', plane: 'top', shapes: [{ id: 'a', kind: 'circle', x: 0, y: 0, d: 10 }] },
+  { id: 'e', type: 'extrude', sketch: 's', distance: 4, op: 'cut' } ] },
+  (r, e) => { expect(!e.length, 'errors'); expect(near(r.max[2], 10), 'nothing added on top'); expect(near(r.volume, 12000 - Math.PI * 25 * 4), 'pocket 4 deep'); });
+{
+  const base = { features: [{ id: 'b', type: 'box', w: 40, d: 30, h: 10 }] };
+  const rb = k.evaluate(base).result;
+  const top = rb.bodies[0].faces.findIndex((f) => f.n && f.n[2] > 0.9);
+  const f = rb.bodies[0].faces[top];
+  run('push/pull cut with a positive distance goes in', { features: [...base.features, { id: 'pp', type: 'extrude', face: { pick: [{ b: 'b', i: top, c: f.c, n: f.n }] }, distance: 3, op: 'cut' }] },
+    (r, e) => { expect(!e.length, 'errors'); expect(near(r.max[2], 7), 'top came down to 7'); });
+  const side = rb.bodies[0].faces.findIndex((x) => x.n && x.n[0] > 0.9);
+  const sf = rb.bodies[0].faces[side];
+  run('lay flat on a side face, then it rests on the bed', { features: [...base.features, { id: 'm', type: 'move', flat: { pick: [{ b: 'b', i: side, c: sf.c, n: sf.n }] } }] },
+    (r, e) => { expect(!e.length, 'errors'); const s = r.max.map((v, i) => v - r.min[i]); expect(near(s[2], 40), 'now 40 tall ' + s); expect(near(r.min[2], 0), 'on the bed'); });
+}
+run('rest on the bed moves only the named body', { features: [
+  { id: 'a', type: 'box', w: 10, d: 10, h: 10, at: [0, 0, -4] },
+  { id: 'c', type: 'box', w: 10, d: 10, h: 10, at: [30, 0, 5], op: 'new' },
+  { id: 'm', type: 'move', bodies: ['a'], drop: true } ] },
+  (r, e) => { expect(!e.length, 'errors'); expect(near(r.bodies[0].min[2], 0), 'a on the bed'); expect(near(r.bodies[1].min[2], 5), 'c untouched'); });
+{
+  const doc = { bodyNames: { c: 'Lid' }, features: [
+    { id: 'a', type: 'box', w: 10, d: 10, h: 10 },
+    { id: 'c', type: 'box', w: 10, d: 10, h: 4, at: [30, 0, 0], op: 'new' } ] };
+  run('named bodies and per-body meshes', doc, (r, e) => {
+    expect(!e.length, 'errors'); expect(r.bodies[1].name === 'Lid', 'renamed ' + r.bodies[1].name);
+    const m = k.exportMeshes(['Lid']); expect(m.length === 1 && m[0].name === 'Lid' && m[0].triangles.length > 0, 'one mesh for the lid');
+    const all = k.exportMeshes(null); expect(all.length === 2, 'two objects');
+  });
+}
+run('a bad shape value keeps the sketch plane', { features: [
+  { id: 's', type: 'sketch', plane: 'XY', shapes: [{ id: 'a', kind: 'rect', x: 0, y: 0, w: 'l', h: 10 }] } ] },
+  (r) => { expect(r.features.s.error, 'reports the error'); expect(r.features.s.frame, 'still has its plane'); });
+
 // caching: second identical evaluate is fast
 let t = performance.now(); k.evaluate(d1); console.log('cached re-eval ms', Math.round(performance.now() - t));
 const stl = k.exportSTL(null, 'standard'); console.log('stl', stl.triangles, 'tris', stl.buffer.byteLength, 'bytes');

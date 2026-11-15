@@ -102,7 +102,8 @@ export function editSketch(id) {
   if (!f) return;
   if (store.mode.kind === 'sketch' && store.mode.id !== id) finishSketch();
   select({ feature: id, shape: null, picks: [] });
-  setMode({ kind: 'sketch', id, tool: f.shapes?.length ? 'select' : 'rect' });
+  setMode({ kind: 'sketch', id, tool: nextSketchTool || (f.shapes?.length ? 'select' : 'rect') });
+  nextSketchTool = null;
 }
 
 export function finishSketch() {
@@ -123,15 +124,45 @@ export function finishSketch() {
   }
   if (!used && f.shapes?.length) {
     const onFace = typeof f.plane === 'object' || !['XY', 'XZ', 'YZ'].includes(String(f.plane).toUpperCase());
-    addFeature('extrude', { sketch: id, distance: 10, op: hasBodies() ? 'join' : 'new', ...(onFace ? { op: 'join' } : {}) });
-    app.toast('Sketch finished. Set the extrude distance, or switch the operation to Cut.');
+    // Only round or slotted shapes drawn on a face of the model: those are holes.
+    const holes = onFace && hasBodies() && f.shapes.every((s) => ['circle', 'slot'].includes(s.kind) || s.hole);
+    const ex = addFeature('extrude', holes ? { sketch: id, extent: 'through', op: 'cut' } : { sketch: id, distance: 10, op: hasBodies() ? 'join' : 'new' });
+    lastAuto = { id: ex.id, sketch: id, revision: store.revision };
+    app.toast(holes ? 'Sketch finished: cut through as holes. Set Extent to Distance for a blind hole, or Operation to Join to add material.' : 'Sketch finished and extruded. Set the distance, or choose Revolve or Cut instead in the inspector.');
   } else select({ feature: id, shape: null });
+}
+
+// The extrude made automatically when a sketch is finished, while it is still untouched: picking
+// Revolve (or "Revolve instead") replaces it rather than stacking a revolve on top.
+let lastAuto = null;
+export function autoExtrude(id) {
+  if (!lastAuto || lastAuto.id !== id) return null;
+  const f = featureById(id);
+  return f && f.type === 'extrude' && f.sketch === lastAuto.sketch ? lastAuto : null;
+}
+export function replaceAutoExtrude(id, type) {
+  const auto = autoExtrude(id);
+  if (!auto) return null;
+  const sketch = auto.sketch;
+  lastAuto = null;
+  if (type === 'cut') {
+    update((doc) => Object.assign(doc.features.find((x) => x.id === id), { op: 'cut' }));
+    return featureById(id);
+  }
+  const rev = { id: newFeatureId('revolve'), type: 'revolve', name: defaultName('revolve'), ...structuredClone(DEFAULTS.revolve), sketch, op: featureById(id).op };
+  update((doc) => {
+    const i = doc.features.findIndex((x) => x.id === id);
+    if (i >= 0) doc.features.splice(i, 1, rev);
+  });
+  select({ feature: rev.id, shape: null, picks: [] });
+  return rev;
 }
 
 // Double-click in the view: a board part opens the placement editor with that part selected.
 export function viewportDoubleClick(pick) {
   if (store.mode.kind !== 'model' || !pick) return;
   const body = store.results?.bodies.find((b) => b.id === pick.b);
+  if (body && !body.board && body.kind !== 'board') return selectBody(body.id); // double-click picks the whole body
   if (!(body?.board || body?.kind === 'board')) return;
   editBoard(body.board || body.id);
   if (body.ref) select({ shape: body.ref });
@@ -266,11 +297,13 @@ export function viewportClick(pick, evt) {
       else cur.push(pickRef(pick));
       f[mode.key] = { pick: cur };
     });
+    if (single && featureById(mode.feature)?.[mode.key]?.pick?.length) leaveMode(); // one face is all it takes
     return;
   }
   if (mode.kind !== 'model') return;
   if (!pick) {
-    if (store.sel.picks.length) select({ picks: [] });
+    // Empty space: let go of whatever is selected, as in other CAD tools.
+    if (store.sel.picks.length || store.sel.feature || store.sel.body) select({ picks: [], feature: null, shape: null, body: null });
     return;
   }
   // A circuit board or one of its parts: select the board (its faces are not for modelling).
@@ -285,7 +318,8 @@ export function viewportClick(pick, evt) {
   const same = (q) => q.kind === p.kind && q.b === p.b && q.i === p.i;
   const multi = evt.shiftKey || evt.ctrlKey || evt.metaKey;
   let picks;
-  if (multi) picks = store.sel.picks.some(same) ? store.sel.picks.filter((q) => !same(q)) : [...store.sel.picks.filter((q) => q.kind === p.kind), p];
+  if (tools.measuring) picks = store.sel.picks.some(same) ? store.sel.picks.filter((q) => !same(q)) : [...store.sel.picks, p].slice(-2);
+  else if (multi) picks = store.sel.picks.some(same) ? store.sel.picks.filter((q) => !same(q)) : [...store.sel.picks.filter((q) => q.kind === p.kind), p];
   else picks = store.sel.picks.length === 1 && same(store.sel.picks[0]) ? [] : [p];
   select({ picks });
 }
@@ -456,12 +490,37 @@ function placement() {
   return rot ? { at, rot } : { at };
 }
 
+// Measure mode: clicks collect two faces or edges (any mix) and the mode bar shows the distance
+// and angle between them.
+export const tools = { measuring: false };
+export function setMeasuring(on) {
+  tools.measuring = on;
+  select({ picks: on ? store.sel.picks.slice(-2) : [], feature: null, body: null });
+}
+
+let nextSketchTool = null;
 export function command(name) {
-  if (name !== 'sketch' && store.mode.kind !== 'model') leaveMode();
+  if (name !== 'sketch' && name !== 'measure' && store.mode.kind !== 'model') leaveMode();
+  if (name !== 'measure' && tools.measuring) tools.measuring = false;
   const op = hasBodies() ? 'join' : 'new';
   switch (name) {
     case 'sketch':
       return startSketch();
+    case 'text':
+      // Text lives in sketches: pick the plane or face, then click where the lettering starts.
+      nextSketchTool = 'text';
+      if (store.mode.kind === 'sketch') return setSketchTool('text');
+      app.toast('Text: pick a plane or a flat face, then click where the text starts.');
+      return startSketch();
+    case 'measure':
+      if (store.mode.kind !== 'model') leaveMode();
+      setMeasuring(!tools.measuring);
+      return null;
+    case 'check':
+      if (store.mode.kind !== 'model') leaveMode();
+      select({ feature: null, body: null, shape: null, picks: [] });
+      emit('print-check', true);
+      return null;
     case 'import':
       return document.getElementById('import-file')?.click();
     case 'board': {
@@ -474,14 +533,18 @@ export function command(name) {
       app.toast('New board. Import a schematic or board (Eagle, Fusion Electronics or KiCad) to bring in its parts, or add blocks; set its outline in the inspector.');
       return f;
     }
+    // A shape placed on a picked face joins that body; one dropped in free space is its own body
+    // (switch Operation to Join or Cut to combine it).
     case 'box':
     case 'cylinder':
     case 'cone':
-    case 'torus':
-      return addFeature(name, { ...placement(), op });
+    case 'torus': {
+      const pl = placement();
+      return addFeature(name, { ...pl, op: pl.at ? op : 'new' });
+    }
     case 'sphere': {
       const pl = placement();
-      return addFeature('sphere', { ...(pl.at ? { at: pl.at } : {}), op });
+      return addFeature('sphere', { ...(pl.at ? { at: pl.at } : {}), op: pl.at ? op : 'new' });
     }
     case 'extrude': {
       const face = selectedPlanarFace();
@@ -499,6 +562,8 @@ export function command(name) {
         app.toast('Revolve needs a profile. Draw half of the cross-section in a sketch first.');
         return startSketch();
       }
+      const auto = lastAuto && featureById(lastAuto.id) && lastAuto.sketch === sk.id && store.revision === lastAuto.revision;
+      if (auto) return replaceAutoExtrude(lastAuto.id, 'revolve');
       return addFeature('revolve', { sketch: sk.id, op });
     }
     case 'fillet':
@@ -541,10 +606,97 @@ export function command(name) {
       const cur = featureById(store.sel.feature);
       return addFeature('mirror', cur && MAKES_TOOL.has(cur.type) ? { features: [cur.id] } : {});
     }
-    case 'move':
+    case 'move': {
       if (!hasBodies()) return app.toast('Make a solid first, then move it.');
-      return addFeature('move');
+      const ids = store.sel.body ? [store.sel.body] : [...new Set(store.sel.picks.map((p) => p.b))];
+      return addFeature('move', ids.length ? { bodies: ids } : {});
+    }
     default:
       return null;
   }
+}
+
+// ---------- bodies ----------
+// The Bodies list: each solid in the model, plus one row per circuit board (its parts go with it).
+export const bodyRows = () => (store.results?.bodies || []).filter((b) => !b.kind || b.kind === 'board');
+
+export function selectBody(id) {
+  if (store.mode.kind !== 'model') leaveMode();
+  select({ body: id, feature: null, shape: null, picks: [] });
+}
+
+function setHidden(fn) {
+  update(
+    (doc) => {
+      const set = new Set(doc.hidden || []);
+      fn(set);
+      const known = new Set(bodyRows().map((b) => b.id));
+      const list = [...set].filter((id) => known.has(id));
+      if (list.length) doc.hidden = list;
+      else delete doc.hidden;
+    },
+    { quiet: true },
+  );
+}
+export const isHidden = (id) => (store.doc.hidden || []).includes(id);
+export function toggleBodyHidden(id) {
+  const hide = !isHidden(id);
+  setHidden((set) => (hide ? set.add(id) : set.delete(id)));
+  if (hide && store.sel.body === id) select({ body: null });
+}
+export function isolateBody(id) {
+  setHidden((set) => {
+    set.clear();
+    for (const b of bodyRows()) if (b.id !== id) set.add(b.id);
+  });
+}
+export function showAllBodies() {
+  setHidden((set) => set.clear());
+}
+
+export function renameBody(id, name) {
+  const body = bodyRows().find((b) => b.id === id);
+  const f = featureById(id);
+  update(
+    (doc) => {
+      if (f?.type === 'board') {
+        doc.features.find((x) => x.id === id).name = name || f.name;
+        return;
+      }
+      doc.bodyNames ||= {};
+      if (name && name !== body?.name) doc.bodyNames[id] = name;
+      else if (!name) delete doc.bodyNames[id];
+      if (!Object.keys(doc.bodyNames).length) delete doc.bodyNames;
+    },
+    { key: `bodyname.${id}` },
+  );
+}
+
+function moveName(word) {
+  const n = store.doc.features.filter((f) => f.type === 'move' && String(f.name || '').startsWith(word)).length + 1;
+  return `${word} ${n}`;
+}
+export function moveBody(id) {
+  if (store.mode.kind !== 'model') leaveMode();
+  return addFeature('move', { bodies: [id] });
+}
+export function dropToBed(id) {
+  if (store.mode.kind !== 'model') leaveMode();
+  const f = addFeature('move', { name: moveName('Rest on bed'), bodies: [id], drop: true }, { focus: false });
+  app.toast('Moved it down so it rests on the bed (Z = 0).');
+  return f;
+}
+// Turn a body so one of its flat faces lies on the bed, the way slicers do it.
+export function layFlat(id = null) {
+  if (store.mode.kind !== 'model') leaveMode();
+  const face = selectedPlanarFace();
+  if (face && (!id || face.b === id)) {
+    const f = addFeature('move', { name: moveName('Lay flat'), bodies: [face.b], flat: { pick: [pickRef(face)] } }, { focus: false });
+    app.toast('Turned it so that face rests on the bed.');
+    return f;
+  }
+  const f = addFeature('move', { name: moveName('Lay flat'), ...(id ? { bodies: [id] } : {}), flat: { pick: [] } }, { focus: false });
+  startPick(f.id, 'flat', 'face');
+  app.toast('Click the flat face that should rest on the bed.');
+  return f;
 }

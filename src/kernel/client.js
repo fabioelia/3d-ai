@@ -179,6 +179,10 @@ export class Kernel {
     return this.call('stl', { bodies, quality });
   }
 
+  exportMeshes(bodies, quality) {
+    return this.call('meshes', { bodies, quality });
+  }
+
   exportSTEP(bodies) {
     return this.call('step', { bodies });
   }

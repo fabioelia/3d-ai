@@ -147,7 +147,7 @@ const ok = (c, m) => {
   // --- outline from the inspector
   await p.keyboard.press('Escape');
   await p.evaluate(() => window.caliper.store.mode.kind === 'board' && window.caliper.act.leaveMode());
-  await p.click('.tl-item');
+  await p.click('#timeline .tl-item');
   await p.selectOption('#board-outline', 'circle');
   await settle();
   f = await board();
@@ -186,7 +186,7 @@ const ok = (c, m) => {
     window.caliper.act.addFeature('box', { w: 80, d: 80, h: 2, at: [0, 0, 4], op: 'new' });
   });
   await settle();
-  await p.click('.tl-item >> nth=0');
+  await p.click('#timeline .tl-item >> nth=0');
   await p.click('text=Check fit in enclosure');
   await p.waitForFunction(() => !/Checking/.test(document.querySelector('.board-issues:last-of-type')?.textContent || 'Checking'), null, { timeout: 15000 }).catch(() => {});
   await p.waitForTimeout(500);
@@ -225,7 +225,7 @@ const ok = (c, m) => {
   await p.screenshot({ path: `${dir}/e2e-board-kicad.png` });
   // Line the KiCad board up on top of the first one.
   await p.evaluate(() => window.caliper.act.leaveMode());
-  await p.click('.tl-item >> nth=-1');
+  await p.click('#timeline .tl-item >> nth=-1');
   await p.selectOption('#lineup-target', { index: 0 });
   const targetName = await p.$eval('#lineup-target', (e) => e.selectedOptions[0].textContent);
   await p.click('text=On top');

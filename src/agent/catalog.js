@@ -238,15 +238,15 @@ export const TOOLS = [
     name: 'export_file',
     title: 'Export a file',
     description:
-      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor; gerber: a zip of Gerber copper, mask, silkscreen and outline layers, Excellon drill files, a BOM and a part-positions file for a board house; or bom: the bill of materials as CSV (the note warns about unrouted connections and design-rule errors). Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
+      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), 3MF (each body a separate object, for slicers that arrange parts on the plate), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor; gerber: a zip of Gerber copper, mask, silkscreen and outline layers, Excellon drill files, a BOM and a part-positions file for a board house; or bom: the bill of materials as CSV (the note warns about unrouted connections and design-rule errors). Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
     inputSchema: {
       type: 'object',
       properties: {
-        format: { type: 'string', enum: ['stl', 'step', 'project', 'eagle_script', 'gerber', 'bom'] },
+        format: { type: 'string', enum: ['stl', '3mf', 'step', 'project', 'eagle_script', 'gerber', 'bom'] },
         board: { type: 'string', description: 'With eagle_script, gerber or bom: which board (default: the open or only one).' },
         path: { type: 'string' },
         quality: { type: 'string', enum: ['draft', 'standard', 'fine'], default: 'standard' },
-        bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids to include (default: all).' },
+        bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids or names to include (default: all printable bodies; bodies the person hid are still included unless you list the others).' },
       },
       required: ['format'],
     },

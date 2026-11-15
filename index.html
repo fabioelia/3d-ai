@@ -54,11 +54,15 @@
           <button type="button" data-file="save">Save project (.json)</button>
           <hr>
           <button type="button" data-file="step">Export STEP</button>
+          <button type="button" data-file="3mf">Export 3MF</button>
         </div>
       </div>
       <div class="menu-wrap">
-        <button class="btn primary" id="export-btn" type="button" aria-haspopup="true" aria-expanded="false">Export STL</button>
+        <button class="btn primary" id="export-btn" type="button" aria-haspopup="true" aria-expanded="false">Export</button>
         <div class="menu wide" id="export-menu" hidden>
+          <label class="menu-field" for="export-what">What to export
+            <select class="in" id="export-what"><option value="visible">All shown bodies</option></select>
+          </label>
           <label class="menu-field" for="stl-quality">Mesh quality
             <select class="in" id="stl-quality">
               <option value="draft">Draft (0.1 mm)</option>
@@ -66,8 +70,12 @@
               <option value="fine">Fine (0.005 mm)</option>
             </select>
           </label>
-          <p class="menu-note">Binary STL in millimetres, all bodies. Finer meshes make smoother curves and bigger files.</p>
-          <button type="button" class="btn primary block" data-file="stl">Download STL</button>
+          <p class="menu-note">Millimetres. Hidden bodies and circuit boards are left out. 3MF keeps each body a separate object on the slicer's plate.</p>
+          <div class="menu-btns">
+            <button type="button" class="btn primary" data-file="stl">Download STL</button>
+            <button type="button" class="btn" data-file="3mf">3MF</button>
+            <button type="button" class="btn" data-file="step">STEP</button>
+          </div>
         </div>
       </div>
     </div>
@@ -83,6 +91,10 @@
       <section class="sec grow-sec">
         <h2 class="sec-title">Timeline</h2>
         <ol class="timeline" id="timeline"></ol>
+      </section>
+      <section class="sec bodies-sec">
+        <div class="sec-head"><h2 class="sec-title" id="bodies-title">Bodies</h2><button class="link-btn" id="bodies-showall" type="button" hidden>Show all</button></div>
+        <ol class="timeline bodies-list" id="bodies" aria-label="Bodies"></ol>
       </section>
     </aside>
 

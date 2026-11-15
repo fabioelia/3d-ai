@@ -218,6 +218,7 @@ export class Viewport {
       this.bodyGroup.add(mesh, lineObj);
       return { ...b, mesh, lineObj };
     });
+    this.applyHidden();
     if (min && max) {
       const ext = Math.max(...max.map((v, i) => Math.max(Math.abs(v), Math.abs(min[i]))));
       const snapped = Math.max(100, Math.ceil(ext / 50) * 50);
@@ -234,6 +235,38 @@ export class Viewport {
       this.fit(false);
     }
     this.requestRender();
+  }
+
+  // Bodies hidden from view (the person's eye toggles): not drawn, not pickable, not in Fit.
+  setHidden(ids) {
+    this.hidden = new Set(ids || []);
+    this.applyHidden();
+    this.refreshHighlights();
+    this.requestRender();
+  }
+
+  applyHidden() {
+    const hid = this.hidden || new Set();
+    for (const b of this.bodies) {
+      const off = hid.has(b.id) || (b.board && hid.has(b.board));
+      b.mesh.visible = !off;
+      b.lineObj.visible = !off;
+    }
+  }
+
+  shownBodies() {
+    return this.bodies.filter((b) => b.mesh.visible);
+  }
+
+  visibleBounds() {
+    const list = this.shownBodies();
+    if (!list.length) return this.bounds;
+    return { min: [0, 1, 2].map((k) => Math.min(...list.map((b) => b.min[k]))), max: [0, 1, 2].map((k) => Math.max(...list.map((b) => b.max[k]))) };
+  }
+
+  // True while the camera is still turning: a sketch drawn now would land on the wrong spot.
+  moving() {
+    return performance.now() < (this.animUntil || 0);
   }
 
   // A feature's own geometry drawn see-through over the model, so it shows even inside a body (a cut,
@@ -279,7 +312,7 @@ export class Viewport {
 
   disposeGroup(group) {
     group.traverse((o) => {
-      if (o.geometry) o.geometry.dispose();
+      if (o.geometry && !o.userData.shared) o.geometry.dispose();
       if (o.material) {
         this.lineMaterials.delete(o.material);
         o.material.dispose();
@@ -313,6 +346,18 @@ export class Viewport {
         this.overlay.add(this.fatLines(body.lines.subarray(grp.start * 3, (grp.start + grp.count) * 3), color, strong ? 4.5 : 3.5));
       }
     };
+    // Whole bodies (picked in the Bodies list, or hovered there): a tint over every face.
+    const tint = (id, color, opacity) => {
+      const body = this.bodies.find((b) => b.id === id && b.mesh.visible);
+      if (!body) return;
+      const m = new THREE.Mesh(body.mesh.geometry, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false }));
+      m.renderOrder = 3;
+      m.userData.shared = true;
+      this.overlay.add(m);
+    };
+    for (const id of this.highlight.bodies || []) tint(id, this.colors.select, 0.32);
+    if (this.highlight.hoverBody) tint(this.highlight.hoverBody, this.colors.hover, 0.25);
+    for (const p of this.highlight.warn || []) draw(p, this.colors.hole, false); // print check: overhangs
     for (const p of this.highlight.selected || []) draw(p, this.colors.select, true);
     const hv = this.highlight.hover;
     if (hv && hv.kind !== 'plane') draw(hv, this.colors.hover, false);
@@ -346,7 +391,7 @@ export class Viewport {
 
   pickFace() {
     const hit = this.raycaster.intersectObjects(
-      this.bodies.map((b) => b.mesh),
+      this.shownBodies().map((b) => b.mesh),
       false,
     )[0];
     if (!hit) return null;
@@ -366,7 +411,7 @@ export class Viewport {
     const dir = this.raycaster.ray.direction;
     const worldPerPx = (cam.top - cam.bottom) / cam.zoom / n.h;
     let best = null;
-    for (const body of this.bodies) {
+    for (const body of this.shownBodies()) {
       const L = body.lines;
       for (const g of body.edgeGroups) {
         if (body.edges[g.i]?.seam || body.edges[g.i]?.soft) continue;
@@ -459,6 +504,7 @@ export class Viewport {
     const from = this.camera.position.clone().sub(target).normalize();
     const start = performance.now();
     const dur = animate ? 260 : 0;
+    this.animUntil = performance.now() + dur + 40;
     const q = new THREE.Quaternion().setFromUnitVectors(from, dir);
     const id = new THREE.Quaternion();
     const step = () => {
@@ -482,10 +528,12 @@ export class Viewport {
 
   view(name) {
     const dirs = { iso: [1, -1.3, 0.9], top: [0, 0, 1], bottom: [0, 0, -1], front: [0, -1, 0], back: [0, 1, 0], right: [1, 0, 0], left: [-1, 0, 0] };
-    this.lookFrom(dirs[name] || dirs.iso);
+    // Turn, then frame what is shown, so a standard view never looks at empty grid.
+    this.lookFrom(dirs[name] || dirs.iso, false);
+    this.fit(true);
   }
 
-  fit(animate = true, box = this.bounds) {
+  fit(animate = true, box = this.visibleBounds()) {
     const min = box ? box.min : [-40, -40, 0];
     const max = box ? box.max : [40, 40, 30];
     const center = new THREE.Vector3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
@@ -497,6 +545,7 @@ export class Viewport {
     const t0 = this.controls.target.clone();
     const start = performance.now();
     const dur = animate ? 240 : 0;
+    this.animUntil = Math.max(this.animUntil || 0, performance.now() + dur + 40);
     const step = () => {
       const k = dur ? Math.min(1, (performance.now() - start) / dur) : 1;
       this.controls.target.lerpVectors(t0, center, k);

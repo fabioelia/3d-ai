@@ -764,9 +764,12 @@ export class BoardEditor {
     else if (k === 'ArrowDown') this.nudge(0, -step);
     else if (k === 'h' || k === 'H') this.api.setTool(this.api.tool() === 'hole' ? 'select' : 'hole');
     else if (k === 'v' || k === 'V') this.api.setTool('select');
-    else if (k === 'Escape' && (this.api.selected() || this.api.tool() !== 'select')) {
-      this.api.select(null);
-      this.api.setTool('select');
+    else if (k === 'Escape') {
+      // Esc lets go of the selection or tool, as in KiCad; it never closes the editor.
+      if (this.api.selected() || this.api.tool() !== 'select') {
+        this.api.select(null);
+        this.api.setTool('select');
+      } else this.api.toast?.('Nothing selected. Press Done (or Enter) to go back to the 3D model.');
     } else return false;
     return true;
   }

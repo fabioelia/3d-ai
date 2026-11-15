@@ -59,7 +59,9 @@ const ok = (c, m) => { console.log(`${c ? 'PASS' : 'FAIL'} ${m}`); if (!c) faile
   await p.click('#modebar >> text=Slot');
   await dragWorld([-22, -8, 6], [-8, -8, 6]); await settle();
   await p.click('#finish-sketch'); await settle();
-  await p.selectOption('#f-op', 'cut'); await p.fill('#f-distance', '-3'); await settle();
+  let ex = await p.evaluate(() => window.caliper.store.doc.features.at(-1));
+  ok(ex.op === 'cut' && ex.extent === 'through', `a slot drawn on a face becomes a through cut (${ex.op}, ${ex.extent})`);
+  await p.selectOption('#f-extent', 'distance'); await p.fill('#f-distance', '3'); await settle();
   s = await state(); const slotA = 14 * 6 + Math.PI * 9;
   ok(!s.errs.length && near(s.vol, (2400 - Math.PI * 16) * 6 - slotA * 3), `pocket cut into the face (vol ${s.vol}, errs ${s.errs})`);
 
@@ -161,7 +163,7 @@ const ok = (c, m) => { console.log(`${c ? 'PASS' : 'FAIL'} ${m}`); if (!c) faile
   // --- the timeline feature in the view, and a filter for many parameters
   await p.click('#file-btn'); await p.click('[data-file="example"]'); await settle();
   const ghostKids = () => p.evaluate(() => window.caliper.viewport.ghostGroup.children.length);
-  await p.click('.tl-item:has-text("Bore")'); await p.waitForTimeout(600);
+  await p.click('#timeline .tl-item:has-text("Bore")'); await p.waitForTimeout(600);
   ok((await ghostKids()) > 0, 'selecting a timeline feature shows what it adds or cuts in the view');
   await p.hover('.tl-item:has-text("Plate outline")'); await p.waitForTimeout(400);
   ok((await ghostKids()) > 0, 'hovering a sketch shows its outline');

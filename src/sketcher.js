@@ -98,6 +98,7 @@ export class Sketcher {
     if (!this.active) return;
     if (type === 'down') {
       if (evt.button !== 0) return;
+      if (this.vp.moving?.()) return; // the view is still turning to face the plane
       this.downAt = { x: evt.clientX, y: evt.clientY };
       const p = this.snap(evt);
       if (!p) return;
