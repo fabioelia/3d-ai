@@ -1,6 +1,6 @@
 # Caliper
 
-A browser CAD tool for 3D-printable parts, in the spirit of Fusion's sketch → extrude → fillet workflow but with far fewer knobs. Any AI agent can plug in over MCP and see, measure and edit the same model you are looking at, while you watch.
+A browser CAD tool for 3D-printable parts, in the spirit of Fusion's sketch → extrude → fillet workflow but with far fewer knobs. Bring the AI you already use (Claude Code, Codex, Cursor, Claude or ChatGPT in the browser) through [AI Connect](https://github.com/fabioelia/ai-connect): it sees, measures and edits the same model you are looking at, while you watch. Caliper calls no model and needs no API key.
 
 **Live:** https://fabioelia.github.io/3d-ai/
 
@@ -8,66 +8,30 @@ A browser CAD tool for 3D-printable parts, in the spirit of Fusion's sketch → 
 - **Parametric timeline.** Every feature stays editable. Any number can be an expression over named parameters (`width/2 - wall`), and the model rebuilds as you type.
 - **Sketching without constraints.** Rectangles, circles, polygons, slots, line paths and text snap to a grid and to each other; exact sizes go in the inspector. A shape drawn inside another becomes a cut-out.
 - **Direct manipulation.** Click a face to sketch on it or push/pull it; click edges to fillet or chamfer them; click a face and Shell to hollow the part.
-- **Agents over MCP.** Claude Code, Claude Desktop, Cursor or any MCP client gets the whole app as tools: the full state, screenshots of what you see, exact geometry and measurements, printability checks, every edit, your selection, your camera, import and export. See [Use it with an AI agent](#use-it-with-an-ai-agent-mcp).
-- **Chat in Caliper.** Type in the side panel; your message goes over MCP to Claude Code on your computer, which works on the model with the same tools and replies there. No API key: it uses your Claude login. Drop, paste or attach images (photos, sketches), 3D files and documents (notes, CSV, schematics such as Eagle `.sch`): images and text go to Claude with your message, 3D files go into the model.
+- **Your own AI, through AI Connect.** Your AI gets the whole app as tools: the full state, screenshots of what you see, exact geometry and measurements, printability checks, every edit, your selection, your camera, import and export. See [Use it with your own AI](#use-it-with-your-own-ai-ai-connect).
+- **Chat in Caliper.** Type in the side panel; your connected AI listens there, works on the model with the same tools and answers in the panel. Drop, paste or attach images (photos, sketches), 3D files and documents (notes, CSV, schematics such as Eagle `.sch`): text goes with your message, your AI looks at images with the `get_attachments` tool, and 3D files go into the model.
 - **3D import.** STL, STEP/STP, OBJ and 3MF, or the zip a model site or a colleague sent. STEP with real surfaces comes in as exact solids; meshes (including Fusion's mesh-only "tessellated" STEP) are repaired automatically (zero-area slivers, T-junctions, duplicate faces, near-miss vertices). Small clean meshes become exact solids whose flat faces you can sketch on, fillet and shell; larger ones become mesh bodies you can move, cut, join and pattern; files that still are not closed solids come in as reference meshes you can view, move, measure and export. Other files in a zip go to the chat when you drop it there.
 - **Circuit boards.** Like the board editors in Fusion, Eagle or KiCad. Import an Eagle / Fusion Electronics schematic (`.sch`) or board (`.brd`), or a KiCad board (`.kicad_pcb`), schematic (`.kicad_sch`) or netlist (`.net`): every part comes in with its footprint, pads, body size and height, plus the nets (KiCad schematics and netlists get footprints from KiCad's standard footprint names), and board files also bring their outline, holes, placement and copper. Place parts in a top-down editor (drag, turn with R, flip to the bottom with F, nudge, holes, outline, automatic arrangement on one or both sides) with airwires and live clash checks. Arrange parts automatically with connected parts kept together, or tidy your own layout for shorter connections. Fit the outline to the inside of your enclosure. Route on two copper layers by hand (45° traces, vias) or with the autorouter, add a ground pour (with thermal reliefs for hand soldering), with design-rule checks (clearance, shorts, edge and hole clearance, widths, drills) as you go. Parts are drawn as real-looking 3D models by kind (banded resistors on bent leads, capacitors, headers with pins, modules on their pins, chips), or use your own STEP/STL per part; copper shows in 3D too. Model the enclosure around the board, check the fit, and add printed standoffs with screw pilot holes under the board's mounting holes. Read part heights from a sizes list or BOM text file. Export Gerber and drill files (with a BOM and part positions) for a board house, a BOM on its own, or a `.scr` script that moves the parts in Eagle / Fusion; STL export leaves the electronics out and STEP keeps them.
 - **Export.** Binary STL (three mesh qualities) and STEP. Projects save as JSON, with imported STLs embedded, and autosave in the browser.
 
-## Use it with an AI agent (MCP)
+## Use it with your own AI (AI Connect)
 
-The Caliper bridge is a small MCP server that runs on your computer. The agent talks MCP to it; Caliper, open in your browser, connects to it over a local WebSocket. Every tool call runs against the live model in your tab, so you see each change land in the timeline and the agent sees what you see.
+Caliper has no AI of its own. Its tools are registered on the page (WebMCP), and [AI Connect](https://github.com/fabioelia/ai-connect) lets the AI you already use reach them. Every tool call runs against the live model in your tab, so you see each change land in the timeline (and can undo it), and your AI sees what you see. Nothing to install for the first three ways.
 
-**Chat from Caliper's side panel** (needs [Claude Code](https://claude.com/claude-code) installed and signed in):
+Click **Connect AI** in the top bar and pick a way:
 
-```bash
-npx -y github:fabioelia/3d-ai --http
-```
+| Way | Choose it when | What you do |
+|---|---|---|
+| **Paste a prompt** | You use Claude Code, Codex, Cursor or another AI that can make web requests. The easiest. | Click **Copy prompt for my AI** and paste it into your AI. It connects itself and starts listening to Caliper's chat panel. Goes through the AI Connect relay, which could read what passes. |
+| **Private connection** | Your designs are sensitive. | Click **Open my hub**, **Allow**, then copy the hub's prompt into your AI. End-to-end encrypted: the relay only passes encrypted bytes. Keep the hub window open. |
+| **Claude or ChatGPT in the browser** | You chat at claude.ai or chatgpt.com. | Click **Approve Caliper**, **Allow**, and once ever add the connector address it gives you to your chat app. |
+| **On this computer only** | Your AI runs on this computer and nothing should leave it. | Once: `claude mcp add ai-connect -- npx -y github:fabioelia/ai-connect mcp` (or that command in any MCP client). Then tell your AI the sentence the menu shows ("Connect to the app with code …"). Chrome or Edge. |
 
-This starts the bridge and opens Caliper in your browser. Type in the side panel: each message runs Claude Code headless on your computer (`claude -p`), with only Caliper's tools enabled (no shell, files or web), and its reply and actions stream back into the panel. Follow-up messages continue the same Claude Code session; **Clear** starts a new one. One message's changes undo together.
+Then type in Caliper's side panel (paste-a-prompt and private routes), or ask your AI in its own window. Changes your AI makes show up beside the model; one chat answer's changes undo together.
 
-**Or drive it from a Claude Code session**
+What your AI can do: read the document (`get_state`), look (`screenshot`, with labelled faces and edges), measure, query geometry, check printability, replace or edit the model (`set_model`, `edit_model`), select, move the camera, use the interface, show a message, ask you a question in a bar over the model (`ask_user`), import a file it sends as base64 (`import_file`), export (`export_file`: saved in your browser, optionally handed back to the AI), lay out and route boards (`place_parts`, `route_board`, `check_board`), and read the guide. It also gets three skills: the Caliper guide, building an enclosure around a board, and making a part printable.
 
-```bash
-claude mcp add caliper -- npx -y github:fabioelia/3d-ai
-```
-
-Then ask: *"Open Caliper and make me a wall bracket for a 25 mm pipe."* The agent calls `open_caliper`, which opens Caliper in your browser and connects it.
-
-**Claude Desktop, Cursor, and other MCP clients**: add a stdio server with command `npx` and arguments `-y github:fabioelia/3d-ai`. For Claude Desktop, in `claude_desktop_config.json`:
-
-```json
-{ "mcpServers": { "caliper": { "command": "npx", "args": ["-y", "github:fabioelia/3d-ai"] } } }
-```
-
-**HTTP instead of stdio**: run `npx -y github:fabioelia/3d-ai --http` (or `npm run bridge` in a checkout) and point the client at `http://127.0.0.1:7429/mcp`, for example `claude mcp add --transport http caliper http://127.0.0.1:7429/mcp`.
-
-How the page finds the bridge:
-
-- Run from a built checkout (`npm run bundle` first), the bridge serves Caliper itself at `http://127.0.0.1:7429/`, and that page connects automatically.
-- Otherwise it opens the hosted app with a connection code in the link (`…/3d-ai/#bridge=7429-…`). Your browser may ask once to allow the page to reach this computer.
-- Or open the **Agent** menu in Caliper and paste the code the agent gives you.
-
-The page keeps reconnecting while the agent restarts. Several agents can work in the same tab at once; the Agent button shows who is attached, and their changes appear in the side panel.
-
-What an agent gets:
-
-| Tool | What it does |
-| --- | --- |
-| `open_caliper` | Opens Caliper and waits for it to connect. |
-| `get_state` | The document, build report (errors, notes, bodies), your selection, mode, open sketch, camera, and a log of what you and other agents did. |
-| `screenshot` | Your exact view, or iso/top/front/… or all four at once, with optional face and edge labels and a legend of refs. |
-| `query_geometry`, `measure` | Every face, edge and body with type, size, position, radius; exact distances and angles. |
-| `check_printability` | Overhangs (with the faces responsible), bed contact, floating or separate bodies, fit in a build volume. |
-| `set_model`, `edit_model` | Build or change the parametric timeline. One call is one undo step. |
-| `import_file`, `export_file` | Read a 3D file (STL, STEP, OBJ, 3MF or a zip) or an Eagle / KiCad board, schematic or netlist from disk into the model (or a STEP as one part's 3D model); write STL, STEP, the project, Gerbers or an Eagle placement script to disk. |
-| `place_parts`, `route_board`, `check_board` | Lay out a circuit board (move, turn, flip, lift, resize parts; outline, holes, auto-arrange; part 3D models), route it (autoroute, add or remove traces and vias, design rules) and check it: clashes, design-rule errors, unrouted connections, collisions with the enclosure. `screenshot` with view `board` shows the layout; `export_file` writes Gerbers. |
-| `select`, `set_view`, `ui_action` | Point at things in your view, move your camera, open sketches, undo and redo. |
-| `ask_user`, `show_message` | Ask you to click the faces or edges it should use (or confirm, or type an answer), and tell you things in Caliper. |
-
-Faces and edges are referred to by refs like `extrude1:F3`, which the agent gets from `get_state`, `query_geometry` or screenshot labels. Refs it writes into features are stored with their geometry, so they keep pointing at the same edge when earlier dimensions change.
-
-Security: the bridge listens on 127.0.0.1 only, rejects other host names and browser origins, and the page must present a per-user secret (kept in `~/.config/caliper/bridge.json`) to connect. `import_stl` and `export_file` read and write files with the agent's permissions, relative to its working directory.
+Security: your AI can do only what Caliper's tools allow, on the page you have open. The prompt works once and expires after 15 minutes; **Disconnect** in the menu revokes the connection. See AI Connect's [security model](https://github.com/fabioelia/ai-connect#security-model).
 
 ## Run it
 
@@ -75,10 +39,11 @@ Security: the bridge listens on 127.0.0.1 only, rejects other host names and bro
 npm install
 npm run dev        # http://127.0.0.1:5173
 npm run bundle     # dist/: index.html (single file), kernel.wasm, mesh.wasm, font.ttf
-                   # (named `bundle`, not `build`, so `npx github:…` installs only the bridge)
-npm run bridge     # the MCP bridge in HTTP mode, serving the build at http://127.0.0.1:7429
 npm run preview    # serve the build on http://127.0.0.1:4173
+npm run vendor:ai-connect   # refresh src/vendor/ai-connect.js from an ai-connect checkout at ../ai-connect
 ```
+
+To try the AI connection against a relay on your own computer, run `npx -y github:fabioelia/ai-connect relay --port 8787` and open Caliper with `?relay=http://127.0.0.1:8787` (only local addresses are accepted there).
 
 ## Deploying
 
@@ -96,7 +61,7 @@ The build uses relative URLs, so it works under `/3d-ai/` or any other path with
 
 `dist/` is a static site; host its four files together anywhere. `index.html` also works opened straight from disk, in which case the kernel and font are fetched from a public CDN instead.
 
-`npm run artifact` additionally writes `dist/artifact.html`, the body-only page for publishing as a Claude artifact. An artifact cannot reach the bridge on your computer, so there the chat panel points to the hosted app instead; modelling works as usual, and exports go through the viewer's save prompt (as a `.zip`, because artifacts cannot save `.stl` directly).
+`npm run artifact` additionally writes `dist/artifact.html`, the body-only page for publishing as a Claude artifact. An artifact cannot open AI Connect's connections, so there the chat panel points to the hosted app instead; modelling works as usual, and exports go through the viewer's save prompt (as a `.zip`, because artifacts cannot save `.stl` directly).
 
 ## Using it
 
@@ -128,11 +93,12 @@ Mouse: drag orbits, right-drag pans, scroll zooms. While sketching, drag draws a
 | `src/viewport.js` | three.js view: bodies, face and edge picking, highlights, camera. |
 | `src/sketcher.js`, `sketchgeo.js` | Drawing and editing 2D shapes on a plane. |
 | `src/actions.js`, `ui.js`, `schema.js` | Commands, panels, and the per-feature field definitions the inspector is generated from. |
-| `src/agent/catalog.js` | The agent tools: names, descriptions, input schemas. Served by the bridge to every agent. |
+| `src/agent/catalog.js` | The tools: names, descriptions, input schemas. |
 | `src/agent/tools.js` | What each tool does inside the page; results are MCP content (text and PNG images). |
-| `src/agent/link.js`, `panel.js` | The page's WebSocket to the bridge, the Agent menu, agent activity, and the prompt bar for `ask_user`. |
-| `bridge/server.mjs` | The MCP server (stdio and Streamable HTTP), the local web server and WebSocket hub, file import/export on disk. |
-| `src/assistant.js`, `guide.js` | The side-panel chat (relayed to Claude Code through the bridge), and the briefing every agent gets (the document format and how to work). |
+| `src/agent/connect.js` | Registers the tools and skills with AI Connect and names who is acting. |
+| `src/agent/panel.js` | The Agent menu (AI Connect's ways to connect), your AI's activity in the side panel, confirmations, and the prompt bar for `ask_user`. |
+| `src/vendor/ai-connect.js` | The AI Connect web SDK, vendored (`npm run vendor:ai-connect`) because Caliper builds into one self-contained file. |
+| `src/assistant.js`, `guide.js` | The side-panel chat (to the AI listening through AI Connect), and the guide every AI gets (the document format and how to work). |
 | `src/export.js` | Saving files (direct download, or zipped through the artifact save prompt). |
 | `src/board/` | Circuit boards: Eagle reader (`eagle.js`, `xml.js`), KiCad reader (`kicad.js`, `sexpr.js`), footprints from KiCad names (`footprints.js`), placement geometry, checks and auto-arrange (`geometry.js`), copper connectivity, design rules and the autorouter (`route.js`), the 2D editor (`editor.js`), 3D part models and copper (`models.js`, `copper3d.js`), Gerber/drill (`gerber.js`) and Eagle script (`script.js`) export. |
 
@@ -143,11 +109,10 @@ Picked faces and edges are stored with their position in the body *and* a geomet
 ```bash
 npm test                 # kernel, 3D import, boards and PCBs (KiCad, routing, DRC, Gerbers): checked against hand-computed values
 npm run bundle && node scripts/make-artifact.mjs && npm run preview &
-npm run test:e2e         # headless Chromium: modelling flows, import, exports, the board placement editor
-npm run test:bridge      # real MCP clients (stdio and HTTP) driving a real browser tab through the bridge
+npm run test:e2e         # headless Chromium: modelling flows, import, exports, the board editor, bodies, focus and scroll, AI Connect
 ```
 
-The end-to-end scripts need Playwright with Chromium available to `require('playwright')`. The bridge suite runs the side-panel chat against `scripts/fake-claude.mjs`, a stand-in for the `claude` command that speaks its stream format and calls real Caliper tools over MCP; it checks the plumbing (tool restrictions, streaming, session resume, undo, errors, Stop), not the quality of Claude's designs. Set `CALIPER_CLAUDE_BIN` to point the bridge at another `claude` executable.
+The end-to-end scripts need Playwright with Chromium available to `require('playwright')`. `scripts/e2e-aiconnect.cjs` starts a local AI Connect relay from an ai-connect checkout (`../ai-connect` after `npm install`, or `AI_CONNECT_DIR`) and plays the person's AI: it follows the pasted prompt, calls Caliper's tools over HTTP, listens to the chat panel and answers there.
 
 ## Limits worth knowing
 
@@ -157,6 +122,6 @@ The end-to-end scripts need Playwright with Chromium available to `require('play
 - Text uses one font (DejaVu Sans Bold) and shows as a placeholder box until extruded.
 - Imported meshes: curved areas of exact-solid imports stay faceted; mesh bodies have no selectable faces or edges, cannot be filleted, chamfered or shelled, and are left out of STEP files. Combining a mesh body with a solid gives a mesh body. Only verifiably closed meshes become solids; anything else (faces folded through each other, internal faces, holes the repair cannot close) is kept as a reference mesh, which never takes part in cuts or joins. Its volume is shown as approximate. IGES is not supported (the bundled OpenCascade build has no IGES reader); STEP assemblies come in as one body per file.
 - Boards: two copper layers (inner layers in KiCad files are left out), pours connect through-hole pads with thermal spokes (surface-mount pads solidly) and keep islands, no differential pairs or length tuning. The autorouter is a grid maze router: good for hobby boards, and it reports what it cannot route. Part models are drawn from footprint and size (heights from package descriptions like "29x17.3x4.3", else estimated); KiCad's own `.wrl` models are not read, use the STEP versions. KiCad schematics: one sheet (no hierarchical sub-sheets), footprints from KiCad's standard library names (others become plain blocks). Always check Gerbers in a viewer before ordering.
-- Safari may refuse the hosted page's connection to the local bridge; use the page the bridge serves (`http://127.0.0.1:7429/`) or another browser.
+- The paste-a-prompt route needs an AI that can make web requests, and a chatting AI keeps its session busy while it listens. The on-this-computer route works in Chrome and Edge. Files your AI sends or gets back pass through the relay, which caps a message at about 1 MB.
 
-OpenCascade is LGPL-2.1; replicad, three.js and the MCP SDK are MIT; Manifold is Apache-2.0; DejaVu fonts are under the Bitstream Vera licence.
+OpenCascade is LGPL-2.1; replicad, three.js and AI Connect are MIT; Manifold is Apache-2.0; DejaVu fonts are under the Bitstream Vera licence.

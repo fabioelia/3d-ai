@@ -1,10 +1,11 @@
-// The side-panel chat. It has no model of its own: every message goes over MCP, through the Caliper
-// bridge, to Claude Code on the person's computer, which works on the model with the same Caliper tools
-// any agent gets and replies here. It runs on the person's own Claude login; there is no API key.
+// The side-panel chat. It has no model of its own: messages go through AI Connect to the AI the
+// person connected (Claude Code, Codex, Claude or ChatGPT…), which listens to this panel, works on the
+// model with Caliper's tools and answers here. It runs on the person's own AI; there is no API key.
 import { store, on, featureById } from './store.js';
 import * as act from './actions.js';
 import { h } from './ui.js';
-import { agentLink } from './agent/panel.js';
+import { agentLink, openAgentMenu } from './agent/panel.js';
+import { setAttachments } from './agent/connect.js';
 
 const SUGGESTIONS = [
   'Make the plate 80 mm wide and add two more holes along the long edges',
@@ -27,11 +28,14 @@ const STEP_LABEL = {
   ask_user: 'Waiting for you',
   export_file: 'Exporting',
   get_guide: 'Reading the guide',
+  get_attachments: 'Looking at your images',
+  place_parts: 'Placing parts',
+  route_board: 'Routing',
+  check_board: 'Checking the board',
 };
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  session: null, // Claude Code session id, resumed so follow-ups keep the conversation
   running: null, // AbortController
   attachments: [], // for the next message: { kind: 'image', name, mediaType, data, url } | { kind: 'part', name, ids }
 };
@@ -156,41 +160,42 @@ function renderAttachments() {
   );
 }
 
+// The chat needs an AI that answers this panel: through the relay or the private hub it listens for
+// messages; a bridge on this computer only takes requests in the AI's own window.
 const connected = () => {
-  const l = agentLink();
-  return !!(l && l.state === 'connected' && l.chat?.available);
+  const ai = agentLink();
+  return !!(ai && ai.status === 'connected' && ai.agent?.chat);
 };
 
-function ask(text, images, turn, signal, onText) {
+function ask(text, turn, signal, onText) {
   return new Promise((resolve, reject) => {
-    let said = '';
-    let gap = false;
-    const cancel = agentLink().chatRequest({ text, sessionId: state.session, images }, (ev) => {
-      if (ev.kind === 'start') {
-        if (ev.sessionId) state.session = ev.sessionId;
-        if (ev.caliper && ev.caliper !== 'connected') turn.onStep('Claude Code could not reach Caliper');
-      } else if (ev.kind === 'text') {
-        if (gap && said) said += '\n\n';
-        gap = false;
-        said += ev.delta;
-        onText(said);
-      } else if (ev.kind === 'break') gap = true;
-      else if (ev.kind === 'tool') turn.onStep(STEP_LABEL[ev.name] || ev.name);
-      else if (ev.kind === 'done') {
-        if (ev.sessionId) state.session = ev.sessionId;
-        resolve(said.trim());
-      } else if (ev.kind === 'cancelled') reject(Object.assign(new Error(''), { cancelled: true, text: said }));
-      else if (ev.kind === 'error') reject(Object.assign(new Error(friendly(ev.message)), { text: said }));
+    const ai = agentLink();
+    const before = ai.messages.length;
+    let msg = null;
+    let off = null;
+    const seen = new Set();
+    const update = () => {
+      msg ||= ai.messages.slice(before).find((m) => m.role === 'assistant') || null;
+      if (!msg) return;
+      for (const t of msg.tools) {
+        if (seen.has(`${t.callId}:${t.status}`)) continue;
+        seen.add(`${t.callId}:${t.status}`);
+        if (t.status === 'running') turn.onStep(STEP_LABEL[t.name] || t.name);
+      }
+      if (msg.text) onText(msg.text);
+      if (msg.pending) return;
+      off?.();
+      if (signal.aborted) reject(Object.assign(new Error(''), { cancelled: true, text: msg.text }));
+      else if (msg.error) reject(Object.assign(new Error(msg.error), { text: msg.text }));
+      else resolve(msg.text.trim());
+    };
+    off = ai.on('messages', update);
+    signal.addEventListener('abort', () => ai.cancel());
+    ai.send(text).then(update, (e) => {
+      off?.();
+      reject(e);
     });
-    signal.addEventListener('abort', cancel);
   });
-}
-
-function friendly(msg = '') {
-  if (/expired|could not be refreshed/i.test(msg)) return 'Claude Code\'s sign-in on this computer has expired. In a terminal, run "claude", type /login and sign in again, then send your message again.';
-  if (/not logged in|\/login|authenticat|invalid api key|oauth/i.test(msg)) return 'Claude Code is not signed in on this computer. In a terminal, run "claude" and sign in (/login), then send again.';
-  if (/rate limit|usage limit|limit reached/i.test(msg)) return `Claude Code hit a usage limit: ${msg}`;
-  return `Claude Code: ${msg}`;
 }
 
 // ---------- UI ----------
@@ -215,11 +220,6 @@ function setRunning(on) {
   $('assistant').classList.toggle('running', on);
 }
 
-function openAgentMenu() {
-  const btn = $('agent-btn');
-  if (btn && !btn.parentElement.hidden && $('agent-menu').hidden) setTimeout(() => btn.click(), 0);
-}
-
 async function send(text) {
   text = text.trim();
   if ((!text && !state.attachments.length) || state.running) return;
@@ -228,6 +228,7 @@ async function send(text) {
     openAgentMenu();
     return;
   }
+  const ai = agentLink();
   if (store.kernel.state !== 'ready') {
     act.app.toast('The geometry kernel is still loading. Try again in a moment.');
     return;
@@ -245,12 +246,14 @@ async function send(text) {
   if (parts.length || texts.length) shown.el.append(h('div', { class: 'msg-steps' }, [...parts.map((p) => h('span', { class: 'step' }, `Imported ${p.name}`)), ...texts.map((t) => h('span', { class: 'step' }, t.name))]));
   // Tell Claude what came with the message; the parts themselves it can see in the model.
   const notes = [];
-  if (images.length) notes.push(`The person attached ${images.length === 1 ? 'an image' : `${images.length} images`} (${images.map((a) => a.name).join(', ')}).`);
+  setAttachments(images);
+  if (images.length) notes.push(`The person attached ${images.length === 1 ? 'an image' : `${images.length} images`} (${images.map((a) => a.name).join(', ')}). Look at ${images.length === 1 ? 'it' : 'them'} with the get_attachments tool.`);
   for (const p of parts) notes.push(`The person dropped ${p.name} into the chat. Now in the model: ${p.files.join(', ')}.`);
   if (texts.length) notes.push(`The person attached ${texts.length === 1 ? 'a file' : `${texts.length} files`} for reference; ${texts.length === 1 ? 'it is' : 'they are'} at the end of this message.`);
   const files = texts.map((t) => `--- ${t.name}${t.cut ? ' (only the first part; the file is longer)' : ''} ---\n${t.text}\n--- end of ${t.name} ---`);
   const message = [...notes, text || (images.length ? 'Here is what I mean.' : 'What can you do with this?'), ...files].join('\n\n');
-  const out = bubble('assistant', 'Thinking…');
+  const out = bubble('assistant', ai.listening ? 'Thinking…' : 'Waiting for your AI to pick this up…');
+  if (!ai.listening) out.steps.append(h('span', { class: 'step warn' }, 'Your AI is not listening to this chat right now: see the Agent menu'));
   out.el.classList.add('pending');
   const ctl = new AbortController();
   state.running = ctl;
@@ -263,7 +266,7 @@ async function send(text) {
       chip.classList.toggle('warn', /could not/.test(label));
     },
   };
-  // Claude Code's edits arrive through the bridge; count them by the undo history.
+  // Your AI's edits arrive as tool calls; count them by the undo history.
   const depth0 = store.undoStack.length;
   let got = '';
   const onText = (whole) => {
@@ -274,7 +277,7 @@ async function send(text) {
     if (follow) $('chat-log').scrollTop = $('chat-log').scrollHeight;
   };
   try {
-    const answer = await ask(message, images.map((a) => ({ mediaType: a.mediaType, data: a.data })), turn, ctl.signal, onText);
+    const answer = await ask(message, turn, ctl.signal, onText);
     out.el.classList.remove('pending');
     out.body.textContent = answer || got || 'Done.';
   } catch (e) {
@@ -314,24 +317,23 @@ async function send(text) {
 }
 
 function renderStatus() {
-  const l = agentLink();
+  const ai = agentLink();
   const ok = connected();
-  const version = l?.chat?.version?.replace(/\s*\(Claude Code\)/, '');
   let note;
-  if (ok) note = `Runs on Claude Code on this computer${version ? ` (${version})` : ''}, with your Claude login. It sees what you see and can only use Caliper's tools.`;
-  else if (l?.state === 'connected') note = l.chat?.outdated ? l.chat.reason : l.chat?.reason ? `${l.chat.reason} The chat runs on Claude Code; install it and sign in, then restart the bridge.` : 'Checking for Claude Code on this computer…';
-  else note = 'The chat runs on Claude Code on your computer, over MCP. Open the Agent menu to connect it.';
+  if (ok) note = ai.listening ? 'Your own AI is listening here, through AI Connect. It sees what you see and can only use Caliper\'s tools.' : 'Your AI is connected but not listening to this chat. Open the Agent menu for the sentence that brings it back.';
+  else if (ai?.status === 'connected') note = 'Your AI is connected on this computer. Ask it in its own window; what it does shows up here. To chat from Caliper, connect by pasting a prompt instead (Agent menu).';
+  else note = 'The chat runs on the AI you already use (Claude Code, Codex, Claude or ChatGPT…). Connect it from the Agent menu.';
   $('chat-note').textContent = note;
-  $('chat-connect').hidden = ok || l?.state === 'connected';
-  $('chat-input').placeholder = ok ? 'Describe a part, or a change to this one' : 'Connect Claude Code to start';
+  $('chat-connect').hidden = ok || ai?.status === 'connected';
+  $('chat-input').placeholder = ok ? 'Describe a part, or a change to this one' : 'Connect your AI to start';
 }
 
 export function initAssistant() {
   if (window.claude?.use) {
-    // Inside a Claude artifact the page cannot reach this computer, so there is no MCP bridge.
+    // Inside a Claude artifact the page cannot open AI Connect's connections.
     $('chat-form').hidden = true;
     $('chat-suggest').hidden = true;
-    $('chat-empty').textContent = 'The Caliper chat runs on Claude Code on your computer, over MCP, which a claude.ai artifact cannot reach. Open Caliper at fabioelia.github.io/3d-ai to chat. Modelling by hand works here as usual.';
+    $('chat-empty').textContent = 'The Caliper chat connects to your own AI through AI Connect, which a claude.ai artifact cannot open. Open Caliper at fabioelia.github.io/3d-ai to chat. Modelling by hand works here as usual.';
     $('chat-clear').hidden = true;
     $('chat-connect').hidden = true;
     return;
@@ -351,12 +353,14 @@ export function initAssistant() {
   $('chat-stop').addEventListener('click', () => state.running?.abort());
   $('chat-clear').addEventListener('click', () => {
     if (state.running) return;
-    state.session = null; // a fresh Claude Code conversation
+    agentLink()?.reset(); // a fresh conversation
     $('chat-log').replaceChildren();
     $('chat-suggest').hidden = false;
     $('chat-empty').hidden = false;
   });
   $('chat-connect').addEventListener('click', openAgentMenu);
+  // Clicking the note's hint opens the menu too.
+  $('chat-note').addEventListener('click', () => !connected() && openAgentMenu());
 
   // Attach by button, by dropping onto the chat panel, or by pasting into the message box.
   $('chat-file-btn').addEventListener('click', () => $('chat-file').click());

@@ -1,5 +1,5 @@
-// The tools Caliper offers to AI agents. Plain data, served by the MCP bridge (bridge/server.mjs), so
-// every agent sees the same surface. Implementations: src/agent/tools.js.
+// The tools Caliper offers to the person's AI. Plain data, registered on the page through AI Connect
+// (src/agent/connect.js), so every AI sees the same surface. Implementations: src/agent/tools.js.
 
 const selector = {
   description:
@@ -147,11 +147,12 @@ export const TOOLS = [
     name: 'import_file',
     title: 'Import a 3D file or a circuit board',
     description:
-      'Bring a file from the local disk into the model. Circuit files become a board feature: Eagle / Fusion Electronics .sch and .brd, KiCad .kicad_pcb, .kicad_sch and .net. Every part comes with its footprint (pads, body, an estimated height; KiCad schematics and netlists get footprints from their standard library names), the nets (airwires), and for a board file also the outline, holes, placement and copper (tracks, vias); a schematic or netlist gets its parts arranged on a board drawn to fit. With board_part, a STEP/STL file becomes the 3D model of that part. 3D files become Import features: STL, STEP/STP, OBJ or 3MF, or a .zip of them (as model sites deliver). STEP files with real surfaces come in as exact solids. Meshes (STL, OBJ, 3MF, and STEP files that only hold a mesh, as Fusion\'s tessellated export does) are repaired, then small clean ones become exact solids whose flat faces can be sketched on, filleted and shelled, larger ones mesh bodies (moved, joined, cut, patterned), and ones that still are not closed reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
+      'Bring a file into the model: pass its bytes as base64 in data with its fileName (up to about 700 KB through the AI Connect relay; for bigger files, ask the person to drop the file onto Caliper). Circuit files become a board feature: Eagle / Fusion Electronics .sch and .brd, KiCad .kicad_pcb, .kicad_sch and .net. Every part comes with its footprint (pads, body, an estimated height; KiCad schematics and netlists get footprints from their standard library names), the nets (airwires), and for a board file also the outline, holes, placement and copper (tracks, vias); a schematic or netlist gets its parts arranged on a board drawn to fit. With board_part, a STEP/STL file becomes the 3D model of that part. 3D files become Import features: STL, STEP/STP, OBJ or 3MF, or a .zip of them (as model sites deliver). STEP files with real surfaces come in as exact solids. Meshes (STL, OBJ, 3MF, and STEP files that only hold a mesh, as Fusion\'s tessellated export does) are repaired, then small clean ones become exact solids whose flat faces can be sketched on, filleted and shelled, larger ones mesh bodies (moved, joined, cut, patterned), and ones that still are not closed reference meshes (shown, moved, measured and exported, but never cut or joined). One file is centred on the bed; several keep the layout they share, centred as a group. Read the notes in the report: they say how each file came in and what was repaired.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Path to the .stl, .step, .stp, .obj, .3mf, .sch, .brd, .kicad_pcb, .kicad_sch, .net or .zip file on this computer.' },
+        fileName: { type: 'string', description: 'The file name with its extension: .stl, .step, .stp, .obj, .3mf, .sch, .brd, .kicad_pcb, .kicad_sch, .net or .zip.' },
+        data: { type: 'string', description: 'The file contents, base64.' },
         board_part: { type: 'string', description: 'Use this STEP/STL/OBJ/3MF file as the 3D model of one board part (its ref, e.g. "U4") instead of importing it as a body. With "board" when there are several boards; rot/at/units adjust it.' },
         board: { type: 'string' },
         name: { type: 'string', description: 'Name for the part in the timeline (single file only).' },
@@ -163,7 +164,7 @@ export const TOOLS = [
         rot: vec3,
         op: { type: 'string', enum: ['new', 'join', 'cut', 'intersect'], default: 'new' },
       },
-      required: ['path'],
+      required: ['fileName', 'data'],
     },
   },
   {
@@ -238,13 +239,13 @@ export const TOOLS = [
     name: 'export_file',
     title: 'Export a file',
     description:
-      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), 3MF (each body a separate object, for slicers that arrange parts on the plate), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor; gerber: a zip of Gerber copper, mask, silkscreen and outline layers, Excellon drill files, a BOM and a part-positions file for a board house; or bom: the bill of materials as CSV (the note warns about unrouted connections and design-rule errors). Through the MCP bridge the file is written to `path` on this computer (default: ./caliper-exports/<part name>.<ext>).',
+      'Export the model: STL (binary, millimetres; quality draft/standard/fine; circuit boards and their parts are left out unless named in bodies), 3MF (each body a separate object, for slicers that arrange parts on the plate), STEP (exact solids, boards and parts included; mesh bodies are left out), the Caliper project (.caliper.json, with imported files embedded), eagle_script: a .scr that moves, turns and flips every placed part, and draws the outline and holes, in the Eagle / Fusion Electronics board editor; gerber: a zip of Gerber copper, mask, silkscreen and outline layers, Excellon drill files, a BOM and a part-positions file for a board house; or bom: the bill of materials as CSV (the note warns about unrouted connections and design-rule errors). The file is saved in the person\'s browser (their downloads, or the save prompt); with return_data the bytes also come back to you as base64 (files up to about 700 KB).',
     inputSchema: {
       type: 'object',
       properties: {
         format: { type: 'string', enum: ['stl', '3mf', 'step', 'project', 'eagle_script', 'gerber', 'bom'] },
         board: { type: 'string', description: 'With eagle_script, gerber or bom: which board (default: the open or only one).' },
-        path: { type: 'string' },
+        return_data: { type: 'boolean', description: 'Also return the file contents (base64), e.g. to write it to disk yourself.' },
         quality: { type: 'string', enum: ['draft', 'standard', 'fine'], default: 'standard' },
         bodies: { type: 'array', items: { type: 'string' }, description: 'Body ids or names to include (default: all printable bodies; bodies the person hid are still included unless you list the others).' },
       },
@@ -322,17 +323,6 @@ export const TOOLS = [
     description: 'The full reference for Caliper documents: units and axes, every feature type and its fields, selectors and refs, and modelling advice. Read it before writing features if you have not.',
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: true },
-  },
-];
-
-// Tools handled by the bridge itself rather than the page.
-export const BRIDGE_TOOLS = [
-  {
-    name: 'open_caliper',
-    title: 'Open Caliper',
-    description:
-      'Make sure Caliper is open in a browser and connected to this agent. Opens it if needed and waits for it to connect. Returns the address to give the person, and who is connected. Call this first if other tools say Caliper is not connected.',
-    inputSchema: { type: 'object', properties: { wait_seconds: { type: 'integer', default: 30 } } },
   },
 ];
 

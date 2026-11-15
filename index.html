@@ -20,25 +20,14 @@
       <span class="tag" id="example-tag" hidden title="This is a sample part. Edit it, or start fresh from the File menu.">Example</span>
       <span class="grow"></span>
       <div class="menu-wrap">
-        <button class="btn agent-btn" id="agent-btn" type="button" aria-haspopup="true" aria-expanded="false" data-state="off" title="Connect an AI agent over MCP">
+        <button class="btn agent-btn" id="agent-btn" type="button" aria-haspopup="true" aria-expanded="false" data-state="off" title="Connect the AI you already use (Claude, ChatGPT, Codex, Cursor…)">
           <span class="agent-dot" aria-hidden="true"></span><span class="agent-ico" id="agent-ico" aria-hidden="true"></span><span id="agent-label">Agent</span>
         </button>
         <div class="menu agent-menu" id="agent-menu" hidden>
-          <h2>Connect an AI agent</h2>
+          <h2>Connect your own AI</h2>
           <p class="agent-status" id="agent-status" role="status"></p>
-          <p class="menu-note">Any MCP agent (Claude Code, Claude Desktop, Cursor and others) can see this part as you see it, read every dimension, and edit, measure, check and export it while you watch.</p>
-          <ol class="agent-steps">
-            <li>Add Caliper to your agent once:
-              <div class="code-row"><code id="agent-install"></code><button class="btn small" id="agent-copy" type="button">Copy</button></div>
-              <span class="menu-note">For other apps, add an MCP server that runs <code>npx -y github:fabioelia/3d-ai</code>.</span>
-            </li>
-            <li>Ask the agent to open Caliper. It connects this page, or gives you a code to paste here.</li>
-          </ol>
-          <div class="agent-connect" id="agent-connect-row">
-            <label for="agent-code">Connection code</label>
-            <div class="code-row"><input class="in" id="agent-code" type="text" autocomplete="off" spellcheck="false" placeholder="7429-1a2b3c…"><button class="btn primary small" id="agent-connect" type="button">Connect</button></div>
-          </div>
-          <button class="btn small" id="agent-disconnect" type="button" hidden>Disconnect</button>
+          <div class="aic-body" id="agent-body"></div>
+          <p class="menu-note aic-foot">Powered by <a href="https://github.com/fabioelia/ai-connect" target="_blank" rel="noopener">AI Connect</a>. Your AI can only use Caliper's tools, and every change can be undone.</p>
         </div>
       </div>
       <button class="icon-btn" id="undo" type="button" title="Undo (Ctrl+Z)" aria-label="Undo"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6L3.500 10.500 8 15"/><path d="M4 10.500h10a5 5 0 010 10h-3"/></svg></button>

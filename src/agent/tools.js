@@ -1,6 +1,5 @@
 // What each agent tool does inside the page. Results are MCP-shaped: { content: [{type:'text'|'image'}],
-// isError?, files? }, so the bridge can pass them straight through and the built-in assistant can
-// map them onto the Claude API.
+// isError? }, as MCP and AI Connect expect, so they pass straight through to the person's AI.
 import { store, on, update, replaceDoc, normalize, select, featureById, undo, redo, logActivity } from '../store.js';
 import { FEATURES, featureLabel } from '../schema.js';
 import { GUIDE } from '../guide.js';
@@ -320,7 +319,7 @@ const IMPL = {
 
   async import_file(args, ctx) {
     await ready();
-    if (!args.data) return fail('import_file reads files through the Caliper MCP bridge; it is not available here.');
+    if (!args.data) return fail('Pass the file contents as base64 in data, with its fileName. For files too big to send, ask the person to drop the file onto Caliper.');
     if (args.board_part) {
       // A 3D model for one part of a board.
       const b = findBoard(args.board);
@@ -475,11 +474,15 @@ const IMPL = {
       const b = findBoard(args.board);
       name = `${safeName(featureLabel(b))}-bom.csv`;
       bytes = new TextEncoder().encode(bomCSV(b));
-    } else return fail('format must be stl, step, project, eagle_script, gerber or bom.');
+    } else return fail('format must be stl, 3mf, step, project, eagle_script, gerber or bom.');
     logActivity(ctx.by, `exported ${name}`);
-    if (ctx.transport === 'bridge') return { content: [text({ file: name, bytes: bytes.length, ...(note ? { note } : {}) })], files: [{ name, path: args.path || null, data: toB64(bytes) }] };
     const msg = await saveFile(name, bytes, 'application/octet-stream');
-    return ok(text({ file: name, bytes: bytes.length, saved: msg || 'The person declined the save.', ...(note ? { note } : {}) }));
+    const out = { file: name, bytes: bytes.length, saved: msg || 'The person declined the save.', ...(note ? { note } : {}) };
+    if (args.return_data) {
+      if (bytes.length <= 700 * 1024) out.data_base64 = toB64(bytes);
+      else out.data_note = `The file is ${Math.round(bytes.length / 1024)} KB, too big to send back; it was saved in the person's browser.`;
+    }
+    return ok(text(out));
   },
 };
 

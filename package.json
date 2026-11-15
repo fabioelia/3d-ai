@@ -1,25 +1,21 @@
 {
   "name": "caliper",
   "version": "1.5.0",
-  "description": "Browser CAD for 3D-printable parts, with a Claude assistant",
+  "description": "Browser CAD for 3D-printable parts; bring your own AI through AI Connect",
   "scripts": {
     "test": "node scripts/test-kernel.mjs && node scripts/test-import.mjs && node scripts/test-board.mjs && node scripts/test-pcb.mjs",
     "dev": "node scripts/prepare-kernel.mjs && vite",
     "preview": "vite preview",
     "artifact": "npm run bundle && node scripts/make-artifact.mjs",
-    "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-board.cjs && node scripts/e2e-bodies.cjs && node scripts/e2e-ui-quirks.cjs",
+    "test:e2e": "node scripts/e2e.cjs && node scripts/e2e-board.cjs && node scripts/e2e-bodies.cjs && node scripts/e2e-ui-quirks.cjs && node scripts/e2e-aiconnect.cjs",
     "deploy": "npm run bundle && node scripts/deploy-pages.mjs",
-    "bridge": "node bridge/server.mjs --http",
-    "test:bridge": "node scripts/e2e-bridge.mjs",
-    "bundle": "node scripts/prepare-kernel.mjs && vite build"
+    "bundle": "node scripts/prepare-kernel.mjs && vite build",
+    "vendor:ai-connect": "node scripts/vendor-ai-connect.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.2",
-    "ws": "8.18.3"
-  },
+  "dependencies": {},
   "devDependencies": {
     "dejavu-fonts-ttf": "^2.37.3",
     "manifold-3d": "^3.5.4",
@@ -30,16 +26,8 @@
     "vite-plugin-singlefile": "^2.3.4"
   },
   "type": "module",
-  "bin": {
-    "caliper-mcp": "bridge/server.mjs"
-  },
-  "files": [
-    "bridge/",
-    "src/agent/catalog.js",
-    "src/guide.js",
-    "dist/"
-  ],
   "engines": {
     "node": ">=20"
-  }
+  },
+  "private": true
 }

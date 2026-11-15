@@ -24,8 +24,8 @@ const ok = (c, m) => { console.log(`${c ? 'PASS' : 'FAIL'} ${m}`); if (!c) faile
   let s = await state();
   ok(s.bodies === 1 && !s.errs.length, `example part builds clean (${s.errs.join('; ')})`);
 
-  // --- the chat is MCP-only: no API key anywhere; without a bridge it points to the Agent menu
-  ok(!(await p.$('#api-key')) && /Agent menu/.test(await p.textContent('#chat-note')), `chat without a bridge explains how to connect: ${await p.textContent('#chat-note')}`);
+  // --- the chat runs on the person's own AI: no API key anywhere; unconnected, it points to the Agent menu
+  ok(!(await p.$('#api-key')) && /Agent menu/.test(await p.textContent('#chat-note')), `chat without an AI explains how to connect: ${await p.textContent('#chat-note')}`);
   await p.fill('#chat-input', 'make a box'); await p.keyboard.press('Enter'); await p.waitForTimeout(300);
   ok(await p.isVisible('#agent-menu') && !(await p.$$('.msg')).length, 'sending without Claude Code connected opens the Agent menu');
   await p.mouse.click(700, 500); await p.fill('#chat-input', '');

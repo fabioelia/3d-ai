@@ -1,5 +1,5 @@
 // Minimal ZIP reader: lists entries and extracts stored or deflated files. Pure JS, used by the page
-// (inflate via DecompressionStream) and the MCP bridge (inflate via zlib). Thingiverse, Printables and
+// (inflate via DecompressionStream) and Node scripts (inflate via zlib). Thingiverse, Printables and
 // most model sites deliver STLs zipped.
 
 export const isZip = (bytes) => bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
