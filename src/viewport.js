@@ -49,7 +49,8 @@ export class Viewport {
     this.overlay = new THREE.Group();
     this.planeGroup = new THREE.Group();
     this.sketchGroup = new THREE.Group();
-    this.scene.add(this.gridGroup, this.bodyGroup, this.overlay, this.planeGroup, this.sketchGroup);
+    this.ghostGroup = new THREE.Group(); // what the selected or hovered timeline feature contributes
+    this.scene.add(this.gridGroup, this.bodyGroup, this.overlay, this.planeGroup, this.sketchGroup, this.ghostGroup);
     this.planeGroup.visible = false;
 
     this.bodies = [];
@@ -231,6 +232,30 @@ export class Viewport {
     if (!this.fitted && this.bodies.length) {
       this.fitted = true;
       this.fit(false);
+    }
+    this.requestRender();
+  }
+
+  // A feature's own geometry drawn see-through over the model, so it shows even inside a body (a cut,
+  // a hole): { positions, indices, lines, cut } and/or polylines [[x,y,z]…] for sketches.
+  setGhost(g) {
+    this.disposeGroup(this.ghostGroup);
+    if (g) {
+      const color = g.cut ? this.colors.hole : this.colors.hover;
+      if (g.indices?.length) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(g.positions, 3));
+        geo.setIndex(new THREE.BufferAttribute(g.indices, 1));
+        const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: g.cut ? 0.28 : 0.22, side: THREE.DoubleSide, depthTest: false, depthWrite: false }));
+        m.renderOrder = 4;
+        this.ghostGroup.add(m);
+      }
+      if (g.lines?.length) this.ghostGroup.add(this.fatLines(g.lines, color, g.indices?.length ? 1.6 : 3.5));
+      for (const pl of g.polylines || []) {
+        const flat = [];
+        for (let i = 0; i < pl.length; i++) flat.push(...pl[i], ...pl[(i + 1) % pl.length]);
+        this.ghostGroup.add(this.fatLines(flat, color, 3));
+      }
     }
     this.requestRender();
   }

@@ -158,6 +158,25 @@ const ok = (c, m) => { console.log(`${c ? 'PASS' : 'FAIL'} ${m}`); if (!c) faile
   await p.waitForFunction(() => window.caliper?.store.results, null, { timeout: 60000 });
   s = await state(); ok(s.n === nSaved && s.bodies === before2 + 1, 'reload restores the saved part, imported STL included');
 
+  // --- the timeline feature in the view, and a filter for many parameters
+  await p.click('#file-btn'); await p.click('[data-file="example"]'); await settle();
+  const ghostKids = () => p.evaluate(() => window.caliper.viewport.ghostGroup.children.length);
+  await p.click('.tl-item:has-text("Bore")'); await p.waitForTimeout(600);
+  ok((await ghostKids()) > 0, 'selecting a timeline feature shows what it adds or cuts in the view');
+  await p.hover('.tl-item:has-text("Plate outline")'); await p.waitForTimeout(400);
+  ok((await ghostKids()) > 0, 'hovering a sketch shows its outline');
+  await p.mouse.move(700, 450); await p.keyboard.press('Escape'); await p.waitForTimeout(400);
+  ok((await ghostKids()) === 0, 'and nothing once nothing is selected');
+  ok(!(await p.$('#param-filter')), 'a few parameters need no filter');
+  await p.click('#params .ghost-btn'); await p.click('#params .ghost-btn');
+  await p.waitForSelector('#param-filter');
+  await p.fill('#param-filter', 'post');
+  const visible = await p.$$eval('.p-row', (r) => r.filter((x) => !x.hidden).map((x) => x.querySelector('.p-name').value));
+  ok(visible.join() === 'post_d,post_h', `with many parameters a filter narrows the list (${visible})`);
+  await p.fill('#param-filter', 'zzz');
+  ok(await p.isVisible('.p-none'), 'and says when nothing matches');
+  await p.fill('#param-filter', '');
+
   ok(errors.length === 0, `no console errors${errors.length ? ': ' + errors.join(' || ') : ''}`);
   await b.close();
   console.log(failed ? `${failed} FAILED` : 'ALL PASS');

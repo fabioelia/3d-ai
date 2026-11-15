@@ -107,6 +107,10 @@ export class Kernel {
     return this.call('autoroute', { board, opts });
   }
 
+  ghost(feature) {
+    return this.call('ghost', { feature });
+  }
+
   surfaceBelow(points) {
     return this.call('below', { points });
   }

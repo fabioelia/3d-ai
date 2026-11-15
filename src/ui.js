@@ -119,6 +119,7 @@ const $ = (id) => document.getElementById(id);
 let refreshers = [];
 let inspectorSig = '';
 let inspectorShowing = '';
+let paramFilter = '';
 let selfEdit = false;
 let toastTimer = null;
 
@@ -253,20 +254,56 @@ function renderParams() {
     );
   });
   refreshersFor('params', list);
+  // Many parameters: a filter (by name or value), and the list scrolls on its own.
+  const title = $('params-title');
+  if (title) title.textContent = store.doc.params.length ? `Parameters (${store.doc.params.length})` : 'Parameters';
+  let filter = null;
+  const shownParams = store.doc.params.map((p) => ({ name: p.name, value: p.value }));
+  const none = h('p', { class: 'p-none', hidden: true }, 'No parameter matches.');
+  const applyFilter = () => {
+    const q = paramFilter.trim().toLowerCase();
+    let shown = 0;
+    shownParams.forEach((p, i) => {
+      const hit = !q || p.name.toLowerCase().includes(q) || String(p.value).toLowerCase().includes(q);
+      rows[i].hidden = !hit;
+      if (hit) shown++;
+    });
+    none.hidden = shown > 0 || !q;
+  };
+  if (store.doc.params.length > 7) {
+    filter = h('input', { type: 'search', class: 'in p-filter', id: 'param-filter', placeholder: 'Filter parameters', 'aria-label': 'Filter parameters', spellcheck: 'false', autocomplete: 'off', value: paramFilter });
+    filter.addEventListener('input', () => {
+      paramFilter = filter.value;
+      applyFilter();
+    });
+    filter.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && filter.value) {
+        e.stopPropagation();
+        filter.value = '';
+        paramFilter = '';
+        applyFilter();
+      }
+    });
+  } else paramFilter = '';
+  applyFilter();
   box.replaceChildren(
-    ...rows,
+    ...(filter ? [filter] : []),
+    h('div', { class: 'p-list' }, ...rows, none),
     h(
       'button',
       {
         class: 'ghost-btn',
         type: 'button',
         onclick: () => {
+          paramFilter = ''; // a new parameter should be in view
           update((doc) => {
             let n = doc.params.length + 1;
             while (doc.params.some((p) => p.name === `p${n}`)) n++;
             doc.params.push({ name: `p${n}`, value: '10' });
           });
-          $(`param-name-${store.doc.params.length - 1}`)?.select();
+          const input = $(`param-name-${store.doc.params.length - 1}`);
+          input?.scrollIntoView({ block: 'nearest' });
+          input?.select();
         },
       },
       h('span', { html: ICON.plus }),
@@ -317,6 +354,8 @@ function renderTimeline() {
           select({ feature: f.id, shape: null });
         },
         ondblclick: () => (f.type === 'sketch' ? act.editSketch(f.id) : f.type === 'board' ? act.editBoard(f.id) : null),
+        onmouseenter: () => emit('ghost-hover', f.id),
+        onmouseleave: () => emit('ghost-hover', null),
         onkeydown: (e) => {
           if (e.key === 'Enter') {
             if (f.type === 'sketch') act.editSketch(f.id);
@@ -1232,6 +1271,8 @@ function bindMenus(fileActions) {
 
 export function initUI(fileActions) {
   renderToolbar();
+  // Rows are rebuilt under the mouse; leaving the list always ends a hover preview.
+  $('timeline').addEventListener('mouseleave', () => emit('ghost-hover', null));
   bindMenus(fileActions);
   $('undo').addEventListener('click', () => undo());
   $('redo').addEventListener('click', () => redo());

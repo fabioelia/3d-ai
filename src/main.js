@@ -1,6 +1,8 @@
 // Caliper: boot, wire the kernel, viewport, sketcher and panels together.
 import './style.css';
 import { Kernel } from './kernel/client.js';
+import { evalExpr } from './expr.js';
+import { outline } from './sketchgeo.js';
 import { Viewport } from './viewport.js';
 import { Sketcher } from './sketcher.js';
 import { BoardEditor } from './board/editor.js';
@@ -197,6 +199,72 @@ on('select', () => {
   if (boardEditor.active) boardEditor.render();
 });
 on('results', () => boardEditor.active && boardEditor.render());
+
+// ---------- the timeline feature in the view ----------
+// The selected (or hovered) timeline feature shows its own geometry see-through over the model: the
+// solid it adds or cuts, the edges or faces it works on, a sketch's outline, a board.
+const ghostCache = new WeakMap(); // build results -> Map(feature id -> ghost)
+let ghostHover = null;
+const ghostWanted = () => (store.mode.kind === 'model' ? ghostHover || (store.sel.picks.length ? null : store.sel.feature) : null);
+
+function sketchGhost(f, frame) {
+  if (!frame || !f.shapes?.length) return null;
+  const scope = store.results?.params || {};
+  const n = (v) => {
+    try {
+      return evalExpr(v ?? 0, scope);
+    } catch {
+      return 0;
+    }
+  };
+  const at = ([u, v]) => [0, 1, 2].map((k) => frame.origin[k] + frame.x[k] * u + frame.y[k] * v);
+  return { polylines: f.shapes.map((s) => outline(s, n)).filter((pts) => pts.length > 1).map((pts) => pts.map(at)) };
+}
+
+function boardGhost(id, res) {
+  const list = res.bodies.filter((b) => (b.id === id || b.board === id) && !b.detail && b.kind !== 'copper');
+  if (!list.length) return null;
+  const count = list.reduce((s2, b) => s2 + b.positions.length, 0);
+  const positions = new Float32Array(count);
+  const indices = [];
+  let o = 0;
+  for (const b of list) {
+    positions.set(b.positions, o);
+    for (const i of b.indices) indices.push(i + o / 3);
+    o += b.positions.length;
+  }
+  return { positions, indices: new Uint32Array(indices), lines: new Float32Array(0) };
+}
+
+async function ghostFor(id) {
+  const res = store.results;
+  if (!res) return null;
+  let m = ghostCache.get(res);
+  if (!m) ghostCache.set(res, (m = new Map()));
+  if (m.has(id)) return m.get(id);
+  const f = featureById(id);
+  let g = null;
+  if (!f || f.suppressed || res.features?.[id]?.error) g = null;
+  else if (f.type === 'sketch') g = sketchGhost(f, res.features?.[id]?.frame);
+  else if (f.type === 'board') g = boardGhost(id, res);
+  else g = await kernel.ghost(id).catch(() => null);
+  m.set(id, g);
+  return g;
+}
+
+async function syncGhost() {
+  const id = ghostWanted();
+  if (!id) return viewport.setGhost(null);
+  const g = await ghostFor(id);
+  if (ghostWanted() === id) viewport.setGhost(g);
+}
+on('select', syncGhost);
+on('results', syncGhost);
+on('mode', syncGhost);
+on('ghost-hover', (id) => {
+  ghostHover = id || null;
+  syncGhost();
+});
 
 viewport.handlers = {
   click: (pick, evt) => act.viewportClick(pick, evt),
@@ -421,4 +489,4 @@ kernel
   });
 
 // Small hook for automated checks.
-window.caliper = { store, viewport, act, rebuildNow, agentLink };
+window.caliper = { store, viewport, act, rebuildNow, agentLink, ghostFor };

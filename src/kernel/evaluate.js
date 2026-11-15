@@ -40,6 +40,7 @@ export function createKernel(r) {
   let lastBodies = [];
   let lastState = { bodies: [], count: 0 };
   let lastScope = {};
+  let lastRecs = {}; // feature id -> what it recorded in the last build (tools, picked edges/faces)
   const meshCache = new WeakMap();
   const rawMeshCache = new WeakMap();
   const topoCache = new WeakMap();
@@ -980,6 +981,7 @@ export function createKernel(r) {
         for (const [bi, set] of sel) {
           const t = topo(bodies[bi].shape);
           const list = [...set].map((i) => t.edges[i].clone());
+          (rec.ghostEdges ||= []).push(...list);
           const shape = f.type === 'fillet' ? bodies[bi].shape.fillet(size, (e) => e.inList(list)) : bodies[bi].shape.chamfer(size, (e) => e.inList(list));
           if (isEmpty(shape)) fail(FAIL_HINT[f.type]);
           bodies[bi] = { ...bodies[bi], shape };
@@ -996,6 +998,7 @@ export function createKernel(r) {
         for (const [bi, set] of sel) {
           const t = topo(bodies[bi].shape);
           const list = [...set].map((i) => t.faces[i].clone());
+          (rec.ghostFaces ||= []).push(...list);
           const shape = bodies[bi].shape.shell(th, (fc) => fc.inList(list));
           if (isEmpty(shape)) fail(FAIL_HINT.shell);
           // A wall too thick for the body can come back as the body unchanged: say so instead.
@@ -1129,6 +1132,7 @@ export function createKernel(r) {
     const features = (doc.features || []).filter((f) => f && !f.suppressed);
     const next = [];
     const ctx = { scope, sketches: {}, tools: {} };
+    const recs = {};
     let state = { bodies: [], count: 0 };
     let prevKey = scopeKey;
     const info = {};
@@ -1160,6 +1164,7 @@ export function createKernel(r) {
       entry.key = key;
       if (entry.rec.sketch) ctx.sketches[f.id] = { ...entry.rec.sketch, body: entry.rec.sketchBody };
       if (entry.rec.tool) ctx.tools[f.id] = entry.rec.tool;
+      recs[f.id] = entry.rec;
       info[f.id] = {};
       if (entry.error) info[f.id].error = entry.error;
       if (entry.detail) info[f.id].detail = entry.detail;
@@ -1168,6 +1173,7 @@ export function createKernel(r) {
       if (entry.picks) picks[f.id] = entry.picks;
     });
     cache = next;
+    lastRecs = recs;
     lastBodies = state.bodies;
     lastState = state;
     lastScope = scope;
@@ -1592,5 +1598,52 @@ export function createKernel(r) {
     });
   }
 
-  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference, fitBoard, surfaceBelow };
+  // What a feature contributes, for highlighting it: the solid it adds or removes, or the edges and
+  // faces it works on, as display geometry. Null when there is nothing to show.
+  function ghost(id) {
+    const rec = lastRecs[id];
+    if (!rec) return null;
+    if (!rec.ghostOut) rec.ghostOut = { value: buildGhost(rec) };
+    const g = rec.ghostOut.value;
+    // A copy each time: the arrays are handed over to the page.
+    return g && { positions: g.positions.slice(), indices: g.indices.slice(), lines: g.lines.slice(), cut: g.cut };
+  }
+  function buildGhost(rec) {
+    const out = { positions: [], indices: [], lines: [] };
+    const addMesh = (vertices, triangles) => {
+      const base = out.positions.length / 3;
+      for (const v of vertices) out.positions.push(v);
+      for (const t of triangles) out.indices.push(t + base);
+    };
+    const addShape = (s) => {
+      if (isRaw(s)) addMesh(s.positions, s.indices);
+      else if (isMesh(s)) {
+        const m = meshTriangles(s);
+        addMesh(m.vertices, m.triangles);
+      } else {
+        const m = rawMesh(s);
+        addMesh(m.vertices, m.triangles);
+        try {
+          for (const v of s.meshEdges(DISPLAY_MESH).lines) out.lines.push(v);
+        } catch {
+          /* no edges to draw */
+        }
+      }
+    };
+    try {
+      if (rec.tool) addShape(rec.tool.shape);
+      // makeCompound takes ownership of what it is given: hand it copies.
+      if (rec.ghostEdges?.length) for (const v of r.makeCompound(rec.ghostEdges.map((e) => e.clone())).meshEdges(DISPLAY_MESH).lines) out.lines.push(v);
+      if (rec.ghostFaces?.length) {
+        const m = r.makeCompound(rec.ghostFaces.map((fc) => fc.clone())).mesh(DISPLAY_MESH);
+        addMesh(m.vertices, m.triangles);
+      }
+    } catch {
+      return null;
+    }
+    if (!out.indices.length && !out.lines.length) return null;
+    return { positions: new Float32Array(out.positions), indices: new Uint32Array(out.indices), lines: new Float32Array(out.lines), cut: rec.tool?.f?.op === 'cut' };
+  }
+
+  return { evaluate, exportSTL, exportSTEP, addFile, query, measure, listElements, interference, fitBoard, surfaceBelow, ghost };
 }

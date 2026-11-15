@@ -150,5 +150,18 @@ ok(k.exportSTL(['pcb'], 'draft').triangles > 0, 'naming the board exports it');
 out = k.evaluate({ params: [{ name: 'dia', value: '58' }], features: [{ id: 'b2', type: 'board', outline: { kind: 'circle', d: 'dia' }, parts: [], nets: [] }] }).result;
 ok(near(out.bodies[0].max[0] - out.bodies[0].min[0], 58, 0.05), 'board sizes can use parameters');
 
+// ---------- highlighting a timeline feature ----------
+k.evaluate({ features: [
+  { id: 'gb', type: 'box', w: 40, d: 30, h: 10 },
+  { id: 'gc', type: 'cylinder', d: 6, h: 20, at: [5, 0, -5], op: 'cut' },
+  { id: 'gf', type: 'fillet', edges: { parallel: 'z' }, radius: 2 },
+  { id: 'gs', type: 'shell', faces: 'top', thickness: 1.5 },
+] });
+const gh = (id) => k.ghost(id);
+ok(gh('gb')?.indices.length > 0 && gh('gc')?.cut === true && !gh('gb').cut, 'a feature shows the solid it adds, a cut the solid it removes');
+ok(gh('gf')?.lines.length === 4 * 6 && gh('gf')?.lines.length === 4 * 6, 'a fillet shows its edges, every time it is asked');
+ok(gh('gs')?.indices.length > 0 && gh('gs')?.indices.length > 0, 'a shell shows its open faces');
+ok(gh('nope') === null, 'an unknown feature shows nothing');
+
 console.log(failed ? `\n${failed} board check(s) failed` : '\nAll board checks passed');
 process.exit(failed ? 1 : 0);
